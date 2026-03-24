@@ -6,6 +6,7 @@ import (
 	"log"
 	"math"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,6 +22,16 @@ const (
 	StatusReady    AccountStatus = iota // 可用
 	StatusCooldown                      // 冷却中（被限速）
 	StatusError                         // 不可用（RT 失效等）
+)
+
+// AccountHealthTier 账号健康层级（仅用于调度优先级，不直接暴露给外部 API）
+type AccountHealthTier string
+
+const (
+	HealthTierHealthy AccountHealthTier = "healthy"
+	HealthTierWarm    AccountHealthTier = "warm"
+	HealthTierRisky   AccountHealthTier = "risky"
+	HealthTierBanned  AccountHealthTier = "banned"
 )
 
 // Account 运行时账号状态
@@ -40,10 +51,26 @@ type Account struct {
 	ErrorMsg       string
 
 	// 用量进度（从 Codex 响应头被动解析）
-	UsagePercent7d      float64 // 7d 窗口使用率 0-100+
-	UsagePercent7dValid bool
-	UsageUpdatedAt      time.Time
-	usageProbeInFlight  bool
+	UsagePercent7d        float64 // 7d 窗口使用率 0-100+
+	UsagePercent7dValid   bool
+	UsageUpdatedAt        time.Time
+	usageProbeInFlight    bool
+	recoveryProbeInFlight bool
+
+	// 调度健康信号
+	HealthTier              AccountHealthTier
+	SchedulerScore          float64
+	DynamicConcurrencyLimit int64
+	LatencyEWMA             float64
+	SuccessStreak           int
+	FailureStreak           int
+	LastSuccessAt           time.Time
+	LastFailureAt           time.Time
+	LastUnauthorizedAt      time.Time
+	LastRateLimitedAt       time.Time
+	LastTimeoutAt           time.Time
+	LastServerErrorAt       time.Time
+	LastRecoveryProbeAt     time.Time
 
 	// 高并发调度指标（原子操作，无需锁）
 	ActiveRequests int64 // 当前并发请求数
@@ -61,12 +88,183 @@ func (a *Account) Mu() *sync.RWMutex {
 	return &a.mu
 }
 
+func clampInt(value, minValue, maxValue int) int {
+	if value < minValue {
+		return minValue
+	}
+	if value > maxValue {
+		return maxValue
+	}
+	return value
+}
+
+func concurrencyLimitForTier(baseLimit int64, tier AccountHealthTier) int64 {
+	if baseLimit <= 0 {
+		baseLimit = 1
+	}
+
+	switch tier {
+	case HealthTierHealthy:
+		if baseLimit >= 3 {
+			return 3
+		}
+		return baseLimit
+	case HealthTierWarm:
+		return 1
+	case HealthTierRisky:
+		return 1
+	case HealthTierBanned:
+		return 0
+	default:
+		if baseLimit >= 2 {
+			return 2
+		}
+		return 1
+	}
+}
+
+func tierPriority(tier AccountHealthTier) int {
+	switch tier {
+	case HealthTierHealthy:
+		return 3
+	case HealthTierWarm:
+		return 2
+	case HealthTierRisky:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func (a *Account) healthTierLocked() AccountHealthTier {
+	if a.HealthTier != "" {
+		return a.HealthTier
+	}
+	if a.AccessToken != "" {
+		return HealthTierHealthy
+	}
+	return HealthTierWarm
+}
+
+func (a *Account) recordLatencyLocked(latency time.Duration) {
+	if latency <= 0 {
+		return
+	}
+
+	latencyMs := float64(latency.Milliseconds())
+	if latencyMs <= 0 {
+		return
+	}
+	if a.LatencyEWMA == 0 {
+		a.LatencyEWMA = latencyMs
+		return
+	}
+	a.LatencyEWMA = a.LatencyEWMA*0.8 + latencyMs*0.2
+}
+
+func (a *Account) recomputeSchedulerLocked(baseLimit int64) {
+	now := time.Now()
+	score := 100.0
+
+	if !a.LastUnauthorizedAt.IsZero() {
+		since := now.Sub(a.LastUnauthorizedAt)
+		switch {
+		case since < time.Hour:
+			score -= 50
+		case since < 6*time.Hour:
+			score -= 30
+		case since < 24*time.Hour:
+			score -= 15
+		}
+	}
+	if !a.LastRateLimitedAt.IsZero() {
+		since := now.Sub(a.LastRateLimitedAt)
+		switch {
+		case since < 10*time.Minute:
+			score -= 22
+		case since < time.Hour:
+			score -= 10
+		}
+	}
+	if !a.LastTimeoutAt.IsZero() && now.Sub(a.LastTimeoutAt) < 15*time.Minute {
+		score -= 18
+	}
+	if !a.LastServerErrorAt.IsZero() && now.Sub(a.LastServerErrorAt) < 15*time.Minute {
+		score -= 12
+	}
+
+	score -= float64(clampInt(a.FailureStreak*6, 0, 24))
+	score += float64(clampInt(a.SuccessStreak*2, 0, 12))
+
+	if a.UsagePercent7dValid && strings.EqualFold(a.PlanType, "free") {
+		switch {
+		case a.UsagePercent7d >= 100:
+			score -= 40
+		case a.UsagePercent7d >= 95:
+			score -= 30
+		case a.UsagePercent7d >= 85:
+			score -= 18
+		case a.UsagePercent7d >= 70:
+			score -= 8
+		}
+	}
+
+	switch {
+	case a.LatencyEWMA >= 20000:
+		score -= 15
+	case a.LatencyEWMA >= 10000:
+		score -= 8
+	case a.LatencyEWMA >= 5000:
+		score -= 4
+	}
+
+	tier := HealthTierHealthy
+	switch {
+	case score < 60:
+		tier = HealthTierRisky
+	case score < 85:
+		tier = HealthTierWarm
+	}
+
+	if a.LastFailureAt.After(a.LastSuccessAt) && !a.LastFailureAt.IsZero() && tier == HealthTierHealthy {
+		tier = HealthTierWarm
+	}
+	if !a.LastUnauthorizedAt.IsZero() && now.Sub(a.LastUnauthorizedAt) < 24*time.Hour && tier == HealthTierHealthy {
+		tier = HealthTierWarm
+	}
+	if a.UsagePercent7dValid && strings.EqualFold(a.PlanType, "free") {
+		switch {
+		case a.UsagePercent7d >= 95:
+			tier = HealthTierRisky
+		case a.UsagePercent7d >= 85 && tier == HealthTierHealthy:
+			tier = HealthTierWarm
+		}
+	}
+	if a.HealthTier == HealthTierBanned {
+		tier = HealthTierBanned
+	}
+
+	a.HealthTier = tier
+	a.SchedulerScore = score
+	a.DynamicConcurrencyLimit = concurrencyLimitForTier(baseLimit, tier)
+}
+
+func (a *Account) schedulerSnapshot(baseLimit int64) (AccountHealthTier, float64, int64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.recomputeSchedulerLocked(baseLimit)
+	return a.HealthTier, a.SchedulerScore, a.DynamicConcurrencyLimit
+}
+
 // IsAvailable 检查账号是否可用
 func (a *Account) IsAvailable() bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
 	if a.Status == StatusError {
+		return false
+	}
+	if a.healthTierLocked() == HealthTierBanned {
 		return false
 	}
 	if a.Status == StatusCooldown && time.Now().Before(a.CooldownUtil) {
@@ -103,6 +301,20 @@ func (a *Account) SetCooldownUntil(until time.Time, reason string) {
 	a.Status = StatusCooldown
 	a.CooldownUtil = until
 	a.CooldownReason = reason
+	switch reason {
+	case "unauthorized":
+		a.HealthTier = HealthTierBanned
+	case "rate_limited":
+		if a.healthTierLocked() == HealthTierHealthy {
+			a.HealthTier = HealthTierWarm
+		} else {
+			a.HealthTier = HealthTierRisky
+		}
+	default:
+		if a.HealthTier == "" {
+			a.HealthTier = HealthTierWarm
+		}
+	}
 }
 
 // GetCooldownReason 获取冷却原因
@@ -119,10 +331,20 @@ func (a *Account) HasActiveCooldown() bool {
 	return a.Status == StatusCooldown && time.Now().Before(a.CooldownUtil)
 }
 
+// IsBanned 检查账号是否处于强隔离状态
+func (a *Account) IsBanned() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.healthTierLocked() == HealthTierBanned
+}
+
 // RuntimeStatus 返回运行时状态字符串（供 admin API 使用）
 func (a *Account) RuntimeStatus() string {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
+	if a.healthTierLocked() == HealthTierBanned {
+		return "unauthorized"
+	}
 	switch a.Status {
 	case StatusError:
 		return "error"
@@ -163,6 +385,27 @@ func (a *Account) GetUsagePercent7d() (float64, bool) {
 	return a.UsagePercent7d, a.UsagePercent7dValid
 }
 
+// GetHealthTier 获取当前健康层级
+func (a *Account) GetHealthTier() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return string(a.HealthTier)
+}
+
+// GetSchedulerScore 获取当前调度分
+func (a *Account) GetSchedulerScore() float64 {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.SchedulerScore
+}
+
+// GetDynamicConcurrencyLimit 获取当前动态并发上限
+func (a *Account) GetDynamicConcurrencyLimit() int64 {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.DynamicConcurrencyLimit
+}
+
 // NeedsUsageProbe 判断是否需要主动探针刷新用量
 func (a *Account) NeedsUsageProbe(maxAge time.Duration) bool {
 	a.mu.RLock()
@@ -201,6 +444,45 @@ func (a *Account) FinishUsageProbe() {
 	a.usageProbeInFlight = false
 }
 
+// NeedsRecoveryProbe 判断是否需要对被封禁账号做低频恢复探测
+func (a *Account) NeedsRecoveryProbe(minInterval time.Duration) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	if a.recoveryProbeInFlight || a.healthTierLocked() != HealthTierBanned {
+		return false
+	}
+	if a.RefreshToken == "" {
+		return false
+	}
+	if a.Status == StatusCooldown && time.Now().Before(a.CooldownUtil) {
+		return false
+	}
+	if !a.LastRecoveryProbeAt.IsZero() && time.Since(a.LastRecoveryProbeAt) < minInterval {
+		return false
+	}
+	return true
+}
+
+// TryBeginRecoveryProbe 尝试开始一次恢复探测
+func (a *Account) TryBeginRecoveryProbe() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.recoveryProbeInFlight {
+		return false
+	}
+	a.recoveryProbeInFlight = true
+	a.LastRecoveryProbeAt = time.Now()
+	return true
+}
+
+// FinishRecoveryProbe 结束一次恢复探测
+func (a *Account) FinishRecoveryProbe() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.recoveryProbeInFlight = false
+}
+
 // GetActiveRequests 获取当前并发数
 func (a *Account) GetActiveRequests() int64 {
 	return atomic.LoadInt64(&a.ActiveRequests)
@@ -222,19 +504,20 @@ func (a *Account) GetLastUsedAt() time.Time {
 
 // Store 多账号管理器（PG + Redis）
 type Store struct {
-	mu              sync.RWMutex
-	accounts        []*Account
-	globalProxy     string
-	maxConcurrency  int64        // 每账号最大并发数
-	testConcurrency int64        // 批量测试并发数
-	testModel       atomic.Value // 测试连接使用的模型（string）
-	db              *database.DB
-	tokenCache      *cache.TokenCache
-	usageProbeMu    sync.RWMutex
-	usageProbe      func(context.Context, *Account) error
-	usageProbeBatch atomic.Bool
-	stopCh          chan struct{}
-	wg              sync.WaitGroup
+	mu                 sync.RWMutex
+	accounts           []*Account
+	globalProxy        string
+	maxConcurrency     int64        // 每账号最大并发数
+	testConcurrency    int64        // 批量测试并发数
+	testModel          atomic.Value // 测试连接使用的模型（string）
+	db                 *database.DB
+	tokenCache         *cache.TokenCache
+	usageProbeMu       sync.RWMutex
+	usageProbe         func(context.Context, *Account) error
+	usageProbeBatch    atomic.Bool
+	recoveryProbeBatch atomic.Bool
+	stopCh             chan struct{}
+	wg                 sync.WaitGroup
 }
 
 // NewStore 创建账号管理器
@@ -327,6 +610,7 @@ func (s *Store) loadFromDB(ctx context.Context) error {
 			DBID:         row.ID,
 			RefreshToken: rt,
 			ProxyURL:     proxy,
+			HealthTier:   HealthTierWarm,
 		}
 
 		// 尝试从 credentials 恢复已有的 AT
@@ -335,6 +619,7 @@ func (s *Store) loadFromDB(ctx context.Context) error {
 			account.AccountID = row.GetCredential("account_id")
 			account.Email = row.GetCredential("email")
 			account.PlanType = row.GetCredential("plan_type")
+			account.HealthTier = HealthTierHealthy
 			if expiresAt := row.GetCredential("expires_at"); expiresAt != "" {
 				if parsed, err := time.Parse(time.RFC3339, expiresAt); err == nil {
 					account.ExpiresAt = parsed
@@ -367,6 +652,9 @@ func (s *Store) loadFromDB(ctx context.Context) error {
 				log.Printf("[账号 %d] 解析 codex_7d_used_percent 失败: %v", row.ID, err)
 			}
 		}
+		account.mu.Lock()
+		account.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
+		account.mu.Unlock()
 
 		s.accounts = append(s.accounts, account)
 	}
@@ -388,6 +676,7 @@ func (s *Store) StartBackgroundRefresh() {
 			case <-ticker.C:
 				s.parallelRefreshAll(context.Background())
 				s.TriggerUsageProbeAsync()
+				s.TriggerRecoveryProbeAsync()
 			case <-s.stopCh:
 				return
 			}
@@ -403,24 +692,34 @@ func (s *Store) Stop() {
 
 // ==================== 最少连接调度 ====================
 
-// Next 获取下一个可用账号（最少连接调度 + 并发上限）
-// 选择 ActiveRequests 最小的可用账号，可用账号的并发不能超过 maxConcurrency
+// Next 获取下一个可用账号（健康优先 + 低负载择优）
 func (s *Store) Next() *Account {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	var best *Account
+	bestPriority := -1
+	bestScore := -math.MaxFloat64
 	var bestLoad int64 = math.MaxInt64
+	maxConcurrency := atomic.LoadInt64(&s.maxConcurrency)
 
 	for _, acc := range s.accounts {
 		if !acc.IsAvailable() {
 			continue
 		}
+
 		load := atomic.LoadInt64(&acc.ActiveRequests)
-		if load >= s.maxConcurrency {
-			continue // 超过并发上限，跳过
+		tier, score, limit := acc.schedulerSnapshot(maxConcurrency)
+		if limit <= 0 || load >= limit {
+			continue
 		}
-		if load < bestLoad {
+
+		priority := tierPriority(tier)
+		if priority > bestPriority ||
+			(priority == bestPriority && (score > bestScore ||
+				(score == bestScore && load < bestLoad))) {
+			bestPriority = priority
+			bestScore = score
 			bestLoad = load
 			best = acc
 		}
@@ -544,7 +843,35 @@ func (s *Store) MarkCooldown(acc *Account, duration time.Duration, reason string
 		return
 	}
 
-	until := time.Now().Add(duration)
+	now := time.Now()
+	acc.mu.Lock()
+	switch reason {
+	case "unauthorized":
+		if !acc.LastUnauthorizedAt.IsZero() && now.Sub(acc.LastUnauthorizedAt) < 24*time.Hour {
+			duration = 24 * time.Hour
+		} else {
+			duration = 6 * time.Hour
+		}
+		acc.LastUnauthorizedAt = now
+		acc.LastFailureAt = now
+		acc.FailureStreak++
+		acc.SuccessStreak = 0
+		acc.HealthTier = HealthTierBanned
+	case "rate_limited":
+		acc.LastRateLimitedAt = now
+		acc.LastFailureAt = now
+		acc.FailureStreak++
+		acc.SuccessStreak = 0
+		if acc.healthTierLocked() == HealthTierHealthy {
+			acc.HealthTier = HealthTierWarm
+		} else {
+			acc.HealthTier = HealthTierRisky
+		}
+	}
+	acc.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
+	acc.mu.Unlock()
+
+	until := now.Add(duration)
 	acc.SetCooldownUntil(until, reason)
 
 	if s.db == nil {
@@ -565,11 +892,16 @@ func (s *Store) ClearCooldown(acc *Account) {
 	}
 
 	acc.mu.Lock()
+	wasCooling := acc.Status == StatusCooldown
 	if acc.Status == StatusCooldown {
 		acc.Status = StatusReady
 	}
 	acc.CooldownUtil = time.Time{}
 	acc.CooldownReason = ""
+	if wasCooling {
+		acc.HealthTier = HealthTierWarm
+	}
+	acc.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
 	acc.mu.Unlock()
 
 	if s.db == nil {
@@ -581,6 +913,70 @@ func (s *Store) ClearCooldown(acc *Account) {
 	if err := s.db.ClearCooldown(ctx, acc.DBID); err != nil {
 		log.Printf("[账号 %d] 清理冷却状态失败: %v", acc.DBID, err)
 	}
+}
+
+// ReportRequestSuccess 记录一次成功请求，用于动态调度评分
+func (s *Store) ReportRequestSuccess(acc *Account, latency time.Duration) {
+	if acc == nil {
+		return
+	}
+
+	acc.mu.Lock()
+	defer acc.mu.Unlock()
+
+	acc.recordLatencyLocked(latency)
+	acc.LastSuccessAt = time.Now()
+	acc.SuccessStreak = clampInt(acc.SuccessStreak+1, 0, 20)
+	acc.FailureStreak = 0
+	if acc.HealthTier == "" {
+		acc.HealthTier = HealthTierHealthy
+	}
+	acc.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
+}
+
+// ReportRequestFailure 记录一次失败请求，用于动态调度评分
+func (s *Store) ReportRequestFailure(acc *Account, kind string, latency time.Duration) {
+	if acc == nil {
+		return
+	}
+
+	now := time.Now()
+	acc.mu.Lock()
+	defer acc.mu.Unlock()
+
+	acc.recordLatencyLocked(latency)
+	acc.LastFailureAt = now
+	acc.FailureStreak = clampInt(acc.FailureStreak+1, 0, 20)
+	acc.SuccessStreak = 0
+
+	switch kind {
+	case "timeout":
+		acc.LastTimeoutAt = now
+		if acc.HealthTier == HealthTierHealthy {
+			acc.HealthTier = HealthTierWarm
+		} else {
+			acc.HealthTier = HealthTierRisky
+		}
+	case "server":
+		acc.LastServerErrorAt = now
+		if acc.HealthTier == HealthTierHealthy {
+			acc.HealthTier = HealthTierWarm
+		} else {
+			acc.HealthTier = HealthTierRisky
+		}
+	case "transport":
+		if acc.HealthTier == HealthTierHealthy {
+			acc.HealthTier = HealthTierWarm
+		} else {
+			acc.HealthTier = HealthTierRisky
+		}
+	case "client":
+		if acc.HealthTier == HealthTierHealthy {
+			acc.HealthTier = HealthTierWarm
+		}
+	}
+
+	acc.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
 }
 
 // PersistUsageSnapshot 持久化账号 7d 用量快照
@@ -622,6 +1018,18 @@ func (s *Store) TriggerUsageProbeAsync() {
 	}()
 }
 
+// TriggerRecoveryProbeAsync 异步触发一次封禁账号恢复探测
+func (s *Store) TriggerRecoveryProbeAsync() {
+	if !s.recoveryProbeBatch.CompareAndSwap(false, true) {
+		return
+	}
+
+	go func() {
+		defer s.recoveryProbeBatch.Store(false)
+		s.parallelRecoveryProbe(context.Background())
+	}()
+}
+
 func (s *Store) parallelProbeUsage(ctx context.Context) {
 	s.usageProbeMu.RLock()
 	probeFn := s.usageProbe
@@ -657,6 +1065,55 @@ func (s *Store) parallelProbeUsage(ctx context.Context) {
 			defer cancel()
 			if err := probeFn(probeCtx, account); err != nil {
 				log.Printf("[账号 %d] 用量探针失败: %v", account.DBID, err)
+			}
+		}(acc)
+	}
+
+	wg.Wait()
+}
+
+func (s *Store) parallelRecoveryProbe(ctx context.Context) {
+	s.usageProbeMu.RLock()
+	probeFn := s.usageProbe
+	s.usageProbeMu.RUnlock()
+	if probeFn == nil {
+		return
+	}
+
+	s.mu.RLock()
+	accounts := make([]*Account, len(s.accounts))
+	copy(accounts, s.accounts)
+	s.mu.RUnlock()
+
+	sem := make(chan struct{}, 2)
+	var wg sync.WaitGroup
+
+	for _, acc := range accounts {
+		if !acc.NeedsRecoveryProbe(30 * time.Minute) {
+			continue
+		}
+		if !acc.TryBeginRecoveryProbe() {
+			continue
+		}
+
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(account *Account) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			defer account.FinishRecoveryProbe()
+
+			probeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+
+			if account.NeedsRefresh() {
+				if err := s.refreshAccount(probeCtx, account); err != nil {
+					log.Printf("[账号 %d] 恢复探测前刷新失败: %v", account.DBID, err)
+				}
+			}
+
+			if err := probeFn(probeCtx, account); err != nil {
+				log.Printf("[账号 %d] 恢复探测失败: %v", account.DBID, err)
 			}
 		}(acc)
 	}
@@ -727,6 +1184,9 @@ func (s *Store) parallelRefreshAll(ctx context.Context) {
 		if acc.Status == StatusError {
 			continue
 		}
+		if acc.IsBanned() {
+			continue
+		}
 		if acc.HasActiveCooldown() {
 			continue
 		}
@@ -779,6 +1239,7 @@ func (s *Store) refreshAccount(ctx context.Context, acc *Account) error {
 			acc.CooldownUtil = time.Time{}
 			acc.CooldownReason = ""
 		}
+		acc.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
 		acc.mu.Unlock()
 		if expiredCooldown {
 			_ = s.db.ClearCooldown(ctx, dbID)
@@ -807,6 +1268,7 @@ func (s *Store) refreshAccount(ctx context.Context, acc *Account) error {
 				acc.CooldownUtil = time.Time{}
 				acc.CooldownReason = ""
 			}
+			acc.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
 			acc.mu.Unlock()
 			if expiredCooldown {
 				_ = s.db.ClearCooldown(ctx, dbID)
@@ -851,6 +1313,7 @@ func (s *Store) refreshAccount(ctx context.Context, acc *Account) error {
 		acc.CooldownUtil = time.Time{}
 		acc.CooldownReason = ""
 	}
+	acc.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
 	acc.mu.Unlock()
 
 	// 5. 写入 Redis 缓存

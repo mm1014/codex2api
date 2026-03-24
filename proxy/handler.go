@@ -114,6 +114,31 @@ func extractReasoningEffort(body []byte) string {
 	return ""
 }
 
+func classifyTransportFailure(err error) string {
+	if err == nil {
+		return ""
+	}
+
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline exceeded") {
+		return "timeout"
+	}
+	return "transport"
+}
+
+func classifyHTTPFailure(statusCode int) string {
+	switch {
+	case statusCode == http.StatusUnauthorized || statusCode == http.StatusTooManyRequests:
+		return ""
+	case statusCode >= 500:
+		return "server"
+	case statusCode >= 400:
+		return "client"
+	default:
+		return ""
+	}
+}
+
 // RegisterRoutes 注册路由
 func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	v1 := r.Group("/v1")
@@ -249,6 +274,9 @@ func (h *Handler) Responses(c *gin.Context) {
 		durationMs := int(time.Since(start).Milliseconds())
 
 		if reqErr != nil {
+			if kind := classifyTransportFailure(reqErr); kind != "" {
+				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
+			}
 			h.store.Release(account)
 			log.Printf("上游请求失败 (attempt %d): %v", attempt+1, reqErr)
 			lastErr = reqErr
@@ -256,6 +284,9 @@ func (h *Handler) Responses(c *gin.Context) {
 		}
 
 		if resp.StatusCode != http.StatusOK {
+			if kind := classifyHTTPFailure(resp.StatusCode); kind != "" {
+				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
+			}
 			if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {
 				h.store.PersistUsageSnapshot(account, usagePct)
 			}
@@ -393,6 +424,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {
 			h.store.PersistUsageSnapshot(account, usagePct)
 		}
+		h.store.ReportRequestSuccess(account, time.Duration(totalDuration)*time.Millisecond)
 		h.store.Release(account)
 		return
 	}
@@ -458,6 +490,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		durationMs := int(time.Since(start).Milliseconds())
 
 		if reqErr != nil {
+			if kind := classifyTransportFailure(reqErr); kind != "" {
+				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
+			}
 			h.store.Release(account)
 			log.Printf("上游请求失败 (attempt %d): %v", attempt+1, reqErr)
 			lastErr = reqErr
@@ -465,6 +500,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		}
 
 		if resp.StatusCode != http.StatusOK {
+			if kind := classifyHTTPFailure(resp.StatusCode); kind != "" {
+				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
+			}
 			if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {
 				h.store.PersistUsageSnapshot(account, usagePct)
 			}
@@ -613,6 +651,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {
 			h.store.PersistUsageSnapshot(account, usagePct)
 		}
+		h.store.ReportRequestSuccess(account, time.Duration(totalDuration)*time.Millisecond)
 		h.store.Release(account)
 		return
 	}

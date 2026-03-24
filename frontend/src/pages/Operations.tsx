@@ -1,10 +1,12 @@
-import { useCallback, useEffect } from 'react'
+import { useCallback, useEffect, useMemo } from 'react'
 import { Activity, AlertTriangle, BarChart3, Clock3, Cpu, Database, HardDrive, RefreshCw, Server, Users, Zap } from 'lucide-react'
 import { api } from '../api'
 import PageHeader from '../components/PageHeader'
 import StateShell from '../components/StateShell'
 import { useDataLoader } from '../hooks/useDataLoader'
-import type { OpsOverviewResponse } from '../types'
+import StatusBadge from '../components/StatusBadge'
+import type { AccountRow, OpsOverviewResponse } from '../types'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 
@@ -12,11 +14,25 @@ type MetricTone = 'normal' | 'warning' | 'danger' | 'info'
 
 export default function Operations() {
   const loadOperationsData = useCallback(async () => {
-    return api.getOpsOverview()
+    const [overview, accountsResponse] = await Promise.all([
+      api.getOpsOverview(),
+      api.getAccounts(),
+    ])
+
+    return {
+      overview,
+      accounts: accountsResponse.accounts ?? [],
+    }
   }, [])
 
-  const { data, loading, error, reload, reloadSilently } = useDataLoader<OpsOverviewResponse | null>({
-    initialData: null,
+  const { data, loading, error, reload, reloadSilently } = useDataLoader<{
+    overview: OpsOverviewResponse | null
+    accounts: AccountRow[]
+  }>({
+    initialData: {
+      overview: null,
+      accounts: [],
+    },
     load: loadOperationsData,
   })
 
@@ -28,7 +44,32 @@ export default function Operations() {
     return () => window.clearInterval(timer)
   }, [reloadSilently])
 
-  const updatedLabel = data?.updated_at ? formatTimeLabel(data.updated_at) : '--:--:--'
+  const overview = data.overview
+  const accounts = data.accounts
+  const updatedLabel = overview?.updated_at ? formatTimeLabel(overview.updated_at) : '--:--:--'
+  const schedulerCounts = useMemo(() => ({
+    healthy: accounts.filter((account) => account.health_tier === 'healthy').length,
+    warm: accounts.filter((account) => account.health_tier === 'warm').length,
+    risky: accounts.filter((account) => account.health_tier === 'risky').length,
+    banned: accounts.filter((account) => account.health_tier === 'banned' || account.status === 'unauthorized').length,
+  }), [accounts])
+  const spotlightAccounts = useMemo(() => {
+    const priority = (account: AccountRow) => {
+      if (account.health_tier === 'banned' || account.status === 'unauthorized') return 3
+      if (account.health_tier === 'risky') return 2
+      if (account.health_tier === 'warm') return 1
+      return 0
+    }
+
+    return [...accounts]
+      .filter((account) => priority(account) > 0)
+      .sort((left, right) => {
+        const priorityDiff = priority(right) - priority(left)
+        if (priorityDiff !== 0) return priorityDiff
+        return (left.scheduler_score ?? 0) - (right.scheduler_score ?? 0)
+      })
+      .slice(0, 8)
+  }, [accounts])
 
   return (
     <StateShell
@@ -55,14 +96,65 @@ export default function Operations() {
           }
         />
 
-        {data ? (
+        {overview ? (
           <>
             <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-4 mb-6">
-              <SummaryPill label="运行时长" value={formatUptime(data.uptime_seconds)} />
-              <SummaryPill label="账号池" value={`${data.runtime.available_accounts} / ${data.runtime.total_accounts}`} />
-              <SummaryPill label="今日请求" value={formatNumber(data.traffic.today_requests)} />
-              <SummaryPill label="今日错误率" value={`${data.traffic.error_rate.toFixed(1)}%`} />
+              <SummaryPill label="运行时长" value={formatUptime(overview.uptime_seconds)} />
+              <SummaryPill label="账号池" value={`${overview.runtime.available_accounts} / ${overview.runtime.total_accounts}`} />
+              <SummaryPill label="今日请求" value={formatNumber(overview.traffic.today_requests)} />
+              <SummaryPill label="今日错误率" value={`${overview.traffic.error_rate.toFixed(1)}%`} />
             </div>
+
+            <Card className="mb-6">
+              <CardContent className="p-6">
+                <div className="flex items-center justify-between gap-4 max-sm:flex-col max-sm:items-start">
+                  <div>
+                    <h3 className="text-base font-semibold text-foreground">调度全局视图</h3>
+                    <p className="mt-1 text-sm text-muted-foreground">从系统维度查看当前号池健康分层和高风险账号分布。</p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <SchedulerPill label="Healthy" value={schedulerCounts.healthy} tone="success" />
+                    <SchedulerPill label="Warm" value={schedulerCounts.warm} tone="warning" />
+                    <SchedulerPill label="Risky" value={schedulerCounts.risky} tone="danger" />
+                    <SchedulerPill label="Banned" value={schedulerCounts.banned} tone="neutral" />
+                  </div>
+                </div>
+
+                <div className="mt-5 grid gap-3 md:grid-cols-2">
+                  {spotlightAccounts.length > 0 ? (
+                    spotlightAccounts.map((account) => (
+                      <div key={account.id} className="rounded-2xl border border-border bg-white/50 px-4 py-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="truncate text-[14px] font-semibold text-foreground">
+                              {account.email || `ID ${account.id}`}
+                            </div>
+                            <div className="mt-1 text-[12px] text-muted-foreground">
+                              分 {Math.round(account.scheduler_score ?? 0)} · 并发 {account.dynamic_concurrency_limit ?? '-'} · 套餐 {account.plan_type || '-'}
+                            </div>
+                          </div>
+                          <StatusBadge status={account.status} />
+                        </div>
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                          <Badge variant="outline" className={getHealthTierClassName(account.health_tier)}>
+                            {formatHealthTier(account.health_tier)}
+                          </Badge>
+                          {account.usage_percent_7d !== null && account.usage_percent_7d !== undefined ? (
+                            <Badge variant="outline" className="text-[12px]">
+                              7d {account.usage_percent_7d.toFixed(1)}%
+                            </Badge>
+                          ) : null}
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="rounded-2xl border border-border bg-white/40 px-4 py-4 text-sm text-muted-foreground">
+                      当前没有需要重点关注的风险账号，号池整体处于稳定状态。
+                    </div>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
 
             <Card>
               <CardContent className="p-6">
@@ -76,73 +168,73 @@ export default function Operations() {
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
                   <OpsMetricCard
                     label="CPU"
-                    value={`${data.cpu.percent.toFixed(1)}%`}
-                    sub={`核心数 ${data.cpu.cores} 核`}
+                    value={`${overview.cpu.percent.toFixed(1)}%`}
+                    sub={`核心数 ${overview.cpu.cores} 核`}
                     icon={<Cpu className="size-5" />}
-                    tone={getPercentTone(data.cpu.percent, 70, 90)}
+                    tone={getPercentTone(overview.cpu.percent, 70, 90)}
                   />
                   <OpsMetricCard
                     label="内存"
-                    value={`${data.memory.percent.toFixed(1)}%`}
-                    sub={`使用 ${formatBytes(data.memory.used_bytes)} / ${formatBytes(data.memory.total_bytes)}`}
+                    value={`${overview.memory.percent.toFixed(1)}%`}
+                    sub={`使用 ${formatBytes(overview.memory.used_bytes)} / ${formatBytes(overview.memory.total_bytes)}`}
                     icon={<HardDrive className="size-5" />}
-                    tone={getPercentTone(data.memory.percent, 75, 90)}
+                    tone={getPercentTone(overview.memory.percent, 75, 90)}
                   />
                   <OpsMetricCard
                     label="PostgreSQL"
-                    value={`${data.postgres.usage_percent.toFixed(1)}%`}
-                    sub={`连接 ${data.postgres.open} / ${data.postgres.max_open || '∞'}`}
+                    value={`${overview.postgres.usage_percent.toFixed(1)}%`}
+                    sub={`连接 ${overview.postgres.open} / ${overview.postgres.max_open || '∞'}`}
                     icon={<Database className="size-5" />}
-                    tone={data.postgres.healthy ? getPercentTone(data.postgres.usage_percent, 75, 90) : 'danger'}
+                    tone={overview.postgres.healthy ? getPercentTone(overview.postgres.usage_percent, 75, 90) : 'danger'}
                   />
                   <OpsMetricCard
                     label="Redis"
-                    value={`${data.redis.usage_percent.toFixed(1)}%`}
-                    sub={`连接 ${data.redis.total_conns} / ${data.redis.pool_size || '-'}`}
+                    value={`${overview.redis.usage_percent.toFixed(1)}%`}
+                    sub={`连接 ${overview.redis.total_conns} / ${overview.redis.pool_size || '-'}`}
                     icon={<Server className="size-5" />}
-                    tone={data.redis.healthy ? getPercentTone(data.redis.usage_percent, 70, 90) : 'danger'}
+                    tone={overview.redis.healthy ? getPercentTone(overview.redis.usage_percent, 70, 90) : 'danger'}
                   />
                   <OpsMetricCard
                     label="当前请求"
-                    value={formatNumber(data.requests.active)}
-                    sub={`运行期累计 ${formatNumber(data.requests.total)}`}
+                    value={formatNumber(overview.requests.active)}
+                    sub={`运行期累计 ${formatNumber(overview.requests.total)}`}
                     icon={<Activity className="size-5" />}
-                    tone={data.requests.active >= 20 ? 'warning' : 'normal'}
+                    tone={overview.requests.active >= 20 ? 'warning' : 'normal'}
                   />
                   <OpsMetricCard
                     label="协程"
-                    value={formatNumber(data.runtime.goroutines)}
-                    sub={`账号池 ${data.runtime.available_accounts} / ${data.runtime.total_accounts}`}
+                    value={formatNumber(overview.runtime.goroutines)}
+                    sub={`账号池 ${overview.runtime.available_accounts} / ${overview.runtime.total_accounts}`}
                     icon={<Users className="size-5" />}
-                    tone={data.runtime.goroutines >= 500 ? 'danger' : data.runtime.goroutines >= 200 ? 'warning' : 'normal'}
+                    tone={overview.runtime.goroutines >= 500 ? 'danger' : overview.runtime.goroutines >= 200 ? 'warning' : 'normal'}
                   />
                   <OpsMetricCard
                     label="QPS"
-                    value={data.traffic.qps.toFixed(1)}
-                    sub={`峰值 ${data.traffic.qps_peak.toFixed(1)}`}
+                    value={overview.traffic.qps.toFixed(1)}
+                    sub={`峰值 ${overview.traffic.qps_peak.toFixed(1)}`}
                     icon={<BarChart3 className="size-5" />}
                     tone="info"
                   />
                   <OpsMetricCard
                     label="TPS"
-                    value={formatNumber(Math.round(data.traffic.tps))}
-                    sub={`峰值 ${formatNumber(Math.round(data.traffic.tps_peak))}`}
+                    value={formatNumber(Math.round(overview.traffic.tps))}
+                    sub={`峰值 ${formatNumber(Math.round(overview.traffic.tps_peak))}`}
                     icon={<Zap className="size-5" />}
                     tone="info"
                   />
                   <OpsMetricCard
                     label="RPM"
-                    value={formatNumber(Math.round(data.traffic.rpm))}
-                    sub={data.traffic.rpm_limit > 0 ? `限额 ${formatNumber(data.traffic.rpm_limit)}` : '未开启全局限流'}
+                    value={formatNumber(Math.round(overview.traffic.rpm))}
+                    sub={overview.traffic.rpm_limit > 0 ? `限额 ${formatNumber(overview.traffic.rpm_limit)}` : '未开启全局限流'}
                     icon={<Clock3 className="size-5" />}
-                    tone={data.traffic.rpm_limit > 0 && data.traffic.rpm >= data.traffic.rpm_limit * 0.8 ? 'warning' : 'normal'}
+                    tone={overview.traffic.rpm_limit > 0 && overview.traffic.rpm >= overview.traffic.rpm_limit * 0.8 ? 'warning' : 'normal'}
                   />
                   <OpsMetricCard
                     label="TPM"
-                    value={formatNumber(Math.round(data.traffic.tpm))}
-                    sub={`今日 ${formatNumber(data.traffic.today_tokens)}`}
+                    value={formatNumber(Math.round(overview.traffic.tpm))}
+                    sub={`今日 ${formatNumber(overview.traffic.today_tokens)}`}
                     icon={<AlertTriangle className="size-5" />}
-                    tone={data.traffic.error_rate >= 5 ? 'warning' : 'normal'}
+                    tone={overview.traffic.error_rate >= 5 ? 'warning' : 'normal'}
                   />
                 </div>
               </CardContent>
@@ -226,6 +318,60 @@ function SummaryPill({ label, value }: { label: string; value: string }) {
       <div className="mt-2 text-[20px] font-bold tracking-tight text-foreground">{value}</div>
     </div>
   )
+}
+
+function SchedulerPill({
+  label,
+  value,
+  tone,
+}: {
+  label: string
+  value: number
+  tone: 'neutral' | 'success' | 'warning' | 'danger'
+}) {
+  const toneStyle = {
+    neutral: 'bg-slate-500/10 text-slate-600 dark:bg-slate-500/20 dark:text-slate-300',
+    success: 'bg-emerald-500/10 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-300',
+    warning: 'bg-amber-500/10 text-amber-600 dark:bg-amber-500/20 dark:text-amber-300',
+    danger: 'bg-red-500/10 text-red-600 dark:bg-red-500/20 dark:text-red-300',
+  }[tone]
+
+  return (
+    <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12px] font-semibold ${toneStyle}`}>
+      <span>{label}</span>
+      <span>{value}</span>
+    </span>
+  )
+}
+
+function getHealthTierClassName(healthTier?: string) {
+  switch (healthTier) {
+    case 'healthy':
+      return 'border-transparent bg-emerald-500/10 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-300'
+    case 'warm':
+      return 'border-transparent bg-amber-500/10 text-amber-600 dark:bg-amber-500/20 dark:text-amber-300'
+    case 'risky':
+      return 'border-transparent bg-red-500/10 text-red-600 dark:bg-red-500/20 dark:text-red-300'
+    case 'banned':
+      return 'border-transparent bg-slate-500/10 text-slate-600 dark:bg-slate-500/20 dark:text-slate-300'
+    default:
+      return 'border-border text-muted-foreground'
+  }
+}
+
+function formatHealthTier(healthTier?: string) {
+  switch (healthTier) {
+    case 'healthy':
+      return '健康'
+    case 'warm':
+      return '预热'
+    case 'risky':
+      return '风险'
+    case 'banned':
+      return '隔离'
+    default:
+      return '未知'
+  }
 }
 
 function getPercentTone(value: number, warningThreshold: number, dangerThreshold: number): MetricTone {

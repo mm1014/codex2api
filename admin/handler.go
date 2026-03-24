@@ -117,6 +117,9 @@ type accountResponse struct {
 	Email           string   `json:"email"`
 	PlanType        string   `json:"plan_type"`
 	Status          string   `json:"status"`
+	HealthTier      string   `json:"health_tier"`
+	SchedulerScore  float64  `json:"scheduler_score"`
+	ConcurrencyCap  int64    `json:"dynamic_concurrency_limit"`
 	ProxyURL        string   `json:"proxy_url"`
 	UpdatedAt       string   `json:"updated_at"`
 	ActiveRequests  int64    `json:"active_requests"`
@@ -133,6 +136,7 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 	defer cancel()
 
 	h.store.TriggerUsageProbeAsync()
+	h.store.TriggerRecoveryProbeAsync()
 
 	rows, err := h.db.ListActive(ctx)
 	if err != nil {
@@ -163,6 +167,9 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 		if acc, ok := accountMap[row.ID]; ok {
 			resp.ActiveRequests = acc.GetActiveRequests()
 			resp.TotalRequests = acc.GetTotalRequests()
+			resp.HealthTier = acc.GetHealthTier()
+			resp.SchedulerScore = acc.GetSchedulerScore()
+			resp.ConcurrencyCap = acc.GetDynamicConcurrencyLimit()
 			if usagePct, ok := acc.GetUsagePercent7d(); ok {
 				resp.UsagePercent7d = &usagePct
 			}

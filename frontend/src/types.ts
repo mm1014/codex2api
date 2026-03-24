@@ -21,6 +21,9 @@ export interface AccountRow {
   email: string
   plan_type: string
   status: AccountStatus
+  health_tier?: string
+  scheduler_score?: number
+  dynamic_concurrency_limit?: number
   proxy_url: string
   updated_at: ISODateString
   active_requests?: number

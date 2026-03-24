@@ -79,6 +79,9 @@ export default function Accounts() {
   const normalAccounts = accounts.filter((account) => account.status === 'active' || account.status === 'ready').length
   const rateLimitedAccounts = accounts.filter((account) => account.status === 'rate_limited').length
   const bannedAccounts = accounts.filter((account) => account.status === 'unauthorized').length
+  const healthyAccounts = accounts.filter((account) => account.health_tier === 'healthy').length
+  const warmAccounts = accounts.filter((account) => account.health_tier === 'warm').length
+  const riskyAccounts = accounts.filter((account) => account.health_tier === 'risky').length
 
   const toggleSelect = (id: number) => {
     setSelected((prev) => {
@@ -303,6 +306,14 @@ export default function Accounts() {
           <CompactStat label="封禁账号" value={bannedAccounts} tone="danger" />
         </div>
 
+        <div className="mb-4 flex flex-wrap items-center gap-2 rounded-2xl border border-border bg-white/55 px-4 py-3 text-[12px] text-muted-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.72)]">
+          <span className="font-semibold text-foreground">调度视图</span>
+          <SchedulerChip label="Healthy" value={healthyAccounts} tone="success" />
+          <SchedulerChip label="Warm" value={warmAccounts} tone="warning" />
+          <SchedulerChip label="Risky" value={riskyAccounts} tone="danger" />
+          <SchedulerChip label="Banned" value={bannedAccounts} tone="neutral" />
+        </div>
+
         {selected.size > 0 && (
           <div className="flex items-center justify-between gap-3 px-4 py-2.5 mb-4 rounded-2xl bg-primary/10 border border-primary/20 text-sm font-semibold text-primary">
             <span>已选 {selected.size} 项</span>
@@ -370,7 +381,14 @@ export default function Accounts() {
                         >
                           {account.plan_type || '-'}
                         </TableCell>
-                        <TableCell><StatusBadge status={account.status} /></TableCell>
+                        <TableCell>
+                          <div className="space-y-1">
+                            <StatusBadge status={account.status} />
+                            <div className="text-[11px] text-muted-foreground">
+                              {formatHealthTier(account.health_tier)} · 分 {Math.round(account.scheduler_score ?? 0)} · 并发 {account.dynamic_concurrency_limit ?? '-'}
+                            </div>
+                          </div>
+                        </TableCell>
                         <TableCell>
                           <div className="flex items-center gap-2 text-[13px]">
                             <span className="text-emerald-600 font-medium">{account.success_requests ?? 0}</span>
@@ -544,6 +562,45 @@ function CompactStat({
       </div>
     </div>
   )
+}
+
+function SchedulerChip({
+  label,
+  value,
+  tone,
+}: {
+  label: string
+  value: number
+  tone: 'neutral' | 'success' | 'warning' | 'danger'
+}) {
+  const toneStyle = {
+    neutral: 'bg-slate-500/10 text-slate-600 dark:bg-slate-500/20 dark:text-slate-300',
+    success: 'bg-emerald-500/10 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-300',
+    warning: 'bg-amber-500/10 text-amber-600 dark:bg-amber-500/20 dark:text-amber-300',
+    danger: 'bg-red-500/10 text-red-600 dark:bg-red-500/20 dark:text-red-300',
+  }[tone]
+
+  return (
+    <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 font-semibold ${toneStyle}`}>
+      <span>{label}</span>
+      <span>{value}</span>
+    </span>
+  )
+}
+
+function formatHealthTier(healthTier?: string) {
+  switch (healthTier) {
+    case 'healthy':
+      return '健康'
+    case 'warm':
+      return '预热'
+    case 'risky':
+      return '风险'
+    case 'banned':
+      return '隔离'
+    default:
+      return '未知'
+  }
 }
 
 // ==================== 测试连接弹窗 ====================

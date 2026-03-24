@@ -103,6 +103,7 @@ func main() {
 	// 启动后台刷新
 	store.StartBackgroundRefresh()
 	store.TriggerUsageProbeAsync()
+	store.TriggerRecoveryProbeAsync()
 	defer store.Stop()
 
 	log.Printf("账号就绪: %d/%d 可用", store.AvailableCount(), store.AccountCount())
