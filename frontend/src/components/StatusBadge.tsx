@@ -1,28 +1,25 @@
-interface BadgeInfo {
-  cls: string
-  text: string
-}
+import { Badge } from '@/components/ui/badge'
 
 interface StatusBadgeProps {
   status?: string | null
 }
 
-const statusMap: Record<string, BadgeInfo> = {
-  active: { cls: 'badge-success', text: '可用' },
-  ready: { cls: 'badge-success', text: '就绪' },
-  cooldown: { cls: 'badge-warning', text: '冷却中' },
-  error: { cls: 'badge-danger', text: '错误' },
-  paused: { cls: 'badge-info', text: '已暂停' },
+const statusConfig: Record<string, { variant: 'default' | 'secondary' | 'destructive' | 'outline'; label: string; dotColor: string }> = {
+  active: { variant: 'default', label: '可用', dotColor: 'bg-emerald-500' },
+  ready: { variant: 'default', label: '就绪', dotColor: 'bg-emerald-500' },
+  cooldown: { variant: 'secondary', label: '冷却中', dotColor: 'bg-amber-500' },
+  error: { variant: 'destructive', label: '错误', dotColor: 'bg-red-400' },
+  paused: { variant: 'outline', label: '已暂停', dotColor: 'bg-blue-500' },
 }
 
 export default function StatusBadge({ status }: StatusBadgeProps) {
-  const text = status ?? 'unknown'
-  const info = statusMap[text] ?? { cls: 'badge-info', text }
+  const key = status ?? 'unknown'
+  const config = statusConfig[key] ?? { variant: 'outline' as const, label: key, dotColor: 'bg-gray-400' }
 
   return (
-    <span className={`badge ${info.cls}`}>
-      <span className="badge-dot" />
-      {info.text}
-    </span>
+    <Badge variant={config.variant} className="gap-1.5 text-[13px]">
+      <span className={`size-1.5 rounded-full ${config.dotColor}`} />
+      {config.label}
+    </Badge>
   )
 }

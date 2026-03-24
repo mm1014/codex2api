@@ -8,6 +8,18 @@ import { useToast } from '../hooks/useToast'
 import type { APIKeyRow, HealthResponse } from '../types'
 import { getErrorMessage } from '../utils/error'
 import { formatRelativeTime } from '../utils/time'
+import { Card, CardContent } from '@/components/ui/card'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table'
 
 function maskKey(key: string): string {
   if (!key || key.length < 12) return key
@@ -88,158 +100,175 @@ export default function Settings() {
           description="密钥管理与系统状态"
         />
 
-      <div className="card" style={{ marginBottom: 16 }}>
-        <div className="flex-between mb-4">
-          <h3 style={{ fontSize: 16, fontWeight: 600, color: 'var(--text-primary)' }}>API 密钥</h3>
-        </div>
-
-        <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
-          <input
-            className="form-input"
-            style={{ flex: '1 1 120px', minHeight: 40 }}
-            placeholder="密钥名称（可选）"
-            value={newKeyName}
-            onChange={(event: ChangeEvent<HTMLInputElement>) => setNewKeyName(event.target.value)}
-          />
-          <input
-            className="form-input"
-            style={{ flex: '2 1 240px', minHeight: 40 }}
-            placeholder="自定义密钥（留空则自动生成）"
-            value={newKeyValue}
-            onChange={(event: ChangeEvent<HTMLInputElement>) => setNewKeyValue(event.target.value)}
-            onKeyDown={(event: KeyboardEvent<HTMLInputElement>) => {
-              if (event.key === 'Enter') {
-                void handleCreateKey()
-              }
-            }}
-          />
-          <button className="btn btn-primary" onClick={() => void handleCreateKey()} style={{ whiteSpace: 'nowrap' }}>
-            创建密钥
-          </button>
-        </div>
-
-        {createdKey ? (
-          <div
-            style={{
-              padding: '12px 16px',
-              marginBottom: 16,
-              borderRadius: 12,
-              background: 'var(--success-bg)',
-              border: '1px solid rgba(47, 125, 87, 0.2)',
-              fontSize: 13,
-            }}
-          >
-            <div style={{ fontWeight: 600, marginBottom: 4, color: 'var(--success)' }}>新密钥已生成（仅显示一次）</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <code className="text-mono" style={{ flex: 1, wordBreak: 'break-all' }}>{createdKey}</code>
-              <button className="btn btn-secondary btn-sm" onClick={() => handleCopy(createdKey)}>复制</button>
+        {/* API Keys */}
+        <Card className="mb-4">
+          <CardContent className="p-6">
+            <div className="flex items-center justify-between gap-4 mb-4">
+              <h3 className="text-base font-semibold text-foreground">API 密钥</h3>
             </div>
+
+            <div className="flex gap-2 mb-4 flex-wrap">
+              <Input
+                className="flex-[1_1_120px]"
+                placeholder="密钥名称（可选）"
+                value={newKeyName}
+                onChange={(event: ChangeEvent<HTMLInputElement>) => setNewKeyName(event.target.value)}
+              />
+              <Input
+                className="flex-[2_1_240px]"
+                placeholder="自定义密钥（留空则自动生成）"
+                value={newKeyValue}
+                onChange={(event: ChangeEvent<HTMLInputElement>) => setNewKeyValue(event.target.value)}
+                onKeyDown={(event: KeyboardEvent<HTMLInputElement>) => {
+                  if (event.key === 'Enter') {
+                    void handleCreateKey()
+                  }
+                }}
+              />
+              <Button onClick={() => void handleCreateKey()} className="whitespace-nowrap">
+                创建密钥
+              </Button>
+            </div>
+
+            {createdKey ? (
+              <div className="p-3 mb-4 rounded-xl bg-[hsl(var(--success-bg))] border border-[hsl(var(--success))]/20 text-sm">
+                <div className="font-semibold mb-1 text-[hsl(var(--success))]">新密钥已生成（仅显示一次）</div>
+                <div className="flex items-center gap-2">
+                  <code className="flex-1 font-mono text-[13px] break-all">{createdKey}</code>
+                  <Button variant="outline" size="sm" onClick={() => handleCopy(createdKey)}>复制</Button>
+                </div>
+              </div>
+            ) : null}
+
+            <StateShell
+              variant="section"
+              isEmpty={keys.length === 0}
+              emptyTitle="暂无 API 密钥"
+              emptyDescription="未设置密钥时接口无需鉴权，生成后会显示在这里。"
+            >
+              <div className="overflow-auto border border-border rounded-xl">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="text-[13px] font-semibold">名称</TableHead>
+                      <TableHead className="text-[13px] font-semibold">密钥</TableHead>
+                      <TableHead className="text-[13px] font-semibold">创建时间</TableHead>
+                      <TableHead className="text-[13px] font-semibold">操作</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {keys.map((keyRow) => (
+                      <TableRow key={keyRow.id}>
+                        <TableCell className="text-[14px] font-medium">{keyRow.name}</TableCell>
+                        <TableCell>
+                          <span className="font-mono text-[13px]">{maskKey(keyRow.key)}</span>
+                        </TableCell>
+                        <TableCell className="text-[14px] text-muted-foreground">
+                          {formatRelativeTime(keyRow.created_at, { variant: 'compact' })}
+                        </TableCell>
+                        <TableCell>
+                          <Button variant="destructive" size="sm" onClick={() => void handleDeleteKey(keyRow.id)}>
+                            删除
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </StateShell>
+
+            <div className="text-xs text-muted-foreground mt-3">
+              未设置密钥时 API 无需鉴权。添加第一个密钥后，所有 /v1/* 请求需携带 Authorization: Bearer sk-xxx
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* System Status */}
+        <Card className="mb-4">
+          <CardContent className="p-6">
+            <h3 className="text-base font-semibold text-foreground mb-4">系统状态</h3>
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-3.5">
+              <div className="flex flex-col gap-1.5 p-3.5 rounded-2xl bg-white/40 border border-border">
+                <label className="text-xs font-bold text-muted-foreground">服务</label>
+                <div className="text-[15px] font-semibold">
+                  <Badge variant={health?.status === 'ok' ? 'default' : 'destructive'} className="gap-1.5">
+                    <span className={`size-1.5 rounded-full ${health?.status === 'ok' ? 'bg-emerald-500' : 'bg-red-400'}`} />
+                    {health?.status === 'ok' ? '运行中' : '异常'}
+                  </Badge>
+                </div>
+              </div>
+              <div className="flex flex-col gap-1.5 p-3.5 rounded-2xl bg-white/40 border border-border">
+                <label className="text-xs font-bold text-muted-foreground">账号</label>
+                <div className="text-[15px] font-semibold">{health?.available ?? 0} / {health?.total ?? 0}</div>
+              </div>
+              <div className="flex flex-col gap-1.5 p-3.5 rounded-2xl bg-white/40 border border-border">
+                <label className="text-xs font-bold text-muted-foreground">PostgreSQL</label>
+                <div className="text-[15px] font-semibold">
+                  <Badge variant="default" className="gap-1.5">
+                    <span className="size-1.5 rounded-full bg-emerald-500" />
+                    已连接
+                  </Badge>
+                </div>
+              </div>
+              <div className="flex flex-col gap-1.5 p-3.5 rounded-2xl bg-white/40 border border-border">
+                <label className="text-xs font-bold text-muted-foreground">Redis</label>
+                <div className="text-[15px] font-semibold">
+                  <Badge variant="default" className="gap-1.5">
+                    <span className="size-1.5 rounded-full bg-emerald-500" />
+                    已连接
+                  </Badge>
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* API Endpoints */}
+        <Card>
+          <CardContent className="p-6">
+            <h3 className="text-base font-semibold text-foreground mb-4">API 端点</h3>
+            <div className="overflow-auto border border-border rounded-xl">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="text-[13px] font-semibold">方法</TableHead>
+                    <TableHead className="text-[13px] font-semibold">路径</TableHead>
+                    <TableHead className="text-[13px] font-semibold">说明</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  <TableRow>
+                    <TableCell><Badge variant="default" className="text-[13px]">POST</Badge></TableCell>
+                    <TableCell className="font-mono text-[14px]">/v1/chat/completions</TableCell>
+                    <TableCell className="text-[14px] text-muted-foreground">OpenAI 兼容</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell><Badge variant="outline" className="text-[13px]">POST</Badge></TableCell>
+                    <TableCell className="font-mono text-[14px]">/v1/responses</TableCell>
+                    <TableCell className="text-[14px] text-muted-foreground">Responses API</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell><Badge variant="secondary" className="text-[13px]">GET</Badge></TableCell>
+                    <TableCell className="font-mono text-[14px]">/v1/models</TableCell>
+                    <TableCell className="text-[14px] text-muted-foreground">模型列表</TableCell>
+                  </TableRow>
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
+
+        {toast ? (
+          <div
+            className={`fixed right-6 bottom-6 z-[2000] px-4 py-3 rounded-2xl text-white text-sm font-bold shadow-lg ${
+              toast.type === 'error' ? 'bg-destructive' : 'bg-[hsl(var(--success))]'
+            }`}
+            style={{ animation: 'toast-slide-up 0.22s ease' }}
+          >
+            {toast.msg}
           </div>
         ) : null}
-
-        <StateShell
-          variant="section"
-          isEmpty={keys.length === 0}
-          emptyTitle="暂无 API 密钥"
-          emptyDescription="未设置密钥时接口无需鉴权，生成后会显示在这里。"
-        >
-          <div className="table-container">
-            <table>
-              <thead>
-                <tr>
-                  <th>名称</th>
-                  <th>密钥</th>
-                  <th>创建时间</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {keys.map((keyRow) => (
-                  <tr key={keyRow.id}>
-                    <td style={{ fontWeight: 500 }}>{keyRow.name}</td>
-                    <td>
-                      <span className="text-mono" style={{ fontSize: 12 }}>{maskKey(keyRow.key)}</span>
-                    </td>
-                    <td className="text-muted">{formatRelativeTime(keyRow.created_at, { variant: 'compact' })}</td>
-                    <td>
-                      <button className="btn btn-danger btn-sm" onClick={() => void handleDeleteKey(keyRow.id)}>删除</button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </StateShell>
-
-        <div className="text-muted" style={{ fontSize: 12, marginTop: 12 }}>
-          未设置密钥时 API 无需鉴权。添加第一个密钥后，所有 /v1/* 请求需携带 Authorization: Bearer sk-xxx
-        </div>
-      </div>
-
-      <div className="card" style={{ marginBottom: 16 }}>
-        <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16, color: 'var(--text-primary)' }}>系统状态</h3>
-        <div className="info-grid">
-          <div className="info-item">
-            <label>服务</label>
-            <div className="info-value">
-              <span className={`badge ${health?.status === 'ok' ? 'badge-success' : 'badge-danger'}`}>
-                <span className="badge-dot" />
-                {health?.status === 'ok' ? '运行中' : '异常'}
-              </span>
-            </div>
-          </div>
-          <div className="info-item">
-            <label>账号</label>
-            <div className="info-value">{health?.available ?? 0} / {health?.total ?? 0}</div>
-          </div>
-          <div className="info-item">
-            <label>PostgreSQL</label>
-            <div className="info-value">
-              <span className="badge badge-success"><span className="badge-dot" />已连接</span>
-            </div>
-          </div>
-          <div className="info-item">
-            <label>Redis</label>
-            <div className="info-value">
-              <span className="badge badge-success"><span className="badge-dot" />已连接</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div className="card">
-        <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16, color: 'var(--text-primary)' }}>API 端点</h3>
-        <div className="table-container">
-          <table>
-            <thead>
-              <tr>
-                <th>方法</th>
-                <th>路径</th>
-                <th>说明</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td><span className="badge badge-success">POST</span></td>
-                <td className="text-mono">/v1/chat/completions</td>
-                <td className="text-secondary">OpenAI 兼容</td>
-              </tr>
-              <tr>
-                <td><span className="badge badge-info">POST</span></td>
-                <td className="text-mono">/v1/responses</td>
-                <td className="text-secondary">Responses API</td>
-              </tr>
-              <tr>
-                <td><span className="badge badge-warning">GET</span></td>
-                <td className="text-mono">/v1/models</td>
-                <td className="text-secondary">模型列表</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-        {toast ? <div className={`toast toast-${toast.type}`}>{toast.msg}</div> : null}
       </>
     </StateShell>
   )

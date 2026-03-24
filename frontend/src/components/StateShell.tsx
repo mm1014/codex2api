@@ -1,4 +1,6 @@
 import type { ReactNode } from 'react'
+import { Button } from '@/components/ui/button'
+import { AlertCircle, Inbox } from 'lucide-react'
 
 interface StateShellProps {
   children: ReactNode
@@ -15,29 +17,6 @@ interface StateShellProps {
   emptyDescription?: string
 }
 
-function LoadingIcon() {
-  return <div className="spinner" aria-hidden="true" />
-}
-
-function EmptyIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
-      <rect x="3" y="5" width="18" height="14" rx="2" />
-      <path d="M7 9h10M7 13h6" />
-    </svg>
-  )
-}
-
-function ErrorIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
-      <circle cx="12" cy="12" r="9" />
-      <path d="M12 8v5" />
-      <path d="M12 16h.01" />
-    </svg>
-  )
-}
-
 export default function StateShell({
   children,
   loading = false,
@@ -52,29 +31,31 @@ export default function StateShell({
   emptyTitle = '暂无数据',
   emptyDescription = '当前还没有可展示的内容。',
 }: StateShellProps) {
+  const minH = variant === 'page' ? 'min-h-[320px]' : 'min-h-[220px]'
+
   if (loading) {
     return (
-      <div className={`state-shell state-shell-${variant}`} role="status" aria-live="polite">
-        <div className="state-shell-icon state-shell-icon-loading">
-          <LoadingIcon />
+      <div className={`flex flex-col items-center justify-center gap-3 p-10 border border-border rounded-3xl bg-white/40 text-center ${minH}`} role="status" aria-live="polite">
+        <div className="size-16 flex items-center justify-center rounded-full bg-white/60">
+          <div className="spinner" />
         </div>
-        <strong className="state-shell-title">{loadingTitle}</strong>
-        <p className="state-shell-description">{loadingDescription}</p>
+        <strong className="text-lg font-bold text-foreground">{loadingTitle}</strong>
+        <p className="max-w-[420px] text-sm leading-relaxed text-muted-foreground">{loadingDescription}</p>
       </div>
     )
   }
 
   if (error) {
     return (
-      <div className={`state-shell state-shell-${variant} state-shell-error`} role="alert">
-        <div className="state-shell-icon state-shell-icon-error">
-          <ErrorIcon />
+      <div className={`flex flex-col items-center justify-center gap-3 p-10 border border-border rounded-3xl bg-white/40 text-center ${minH}`} role="alert">
+        <div className="size-16 flex items-center justify-center rounded-full bg-destructive/12 text-destructive">
+          <AlertCircle className="size-6" />
         </div>
-        <strong className="state-shell-title">{errorTitle}</strong>
-        <p className="state-shell-description">{error}</p>
+        <strong className="text-lg font-bold text-foreground">{errorTitle}</strong>
+        <p className="max-w-[420px] text-sm leading-relaxed text-muted-foreground">{error}</p>
         {(onRetry || action) ? (
-          <div className="state-shell-actions">
-            {onRetry ? <button className="btn btn-secondary" onClick={onRetry}>重试</button> : null}
+          <div className="flex items-center justify-center gap-2.5 flex-wrap">
+            {onRetry ? <Button variant="outline" onClick={onRetry}>重试</Button> : null}
             {action}
           </div>
         ) : null}
@@ -84,13 +65,13 @@ export default function StateShell({
 
   if (isEmpty) {
     return (
-      <div className={`state-shell state-shell-${variant} state-shell-empty`}>
-        <div className="state-shell-icon state-shell-icon-empty">
-          <EmptyIcon />
+      <div className={`flex flex-col items-center justify-center gap-3 p-10 border border-border rounded-3xl bg-white/40 text-center ${minH}`}>
+        <div className="size-16 flex items-center justify-center rounded-full bg-[hsl(var(--info-bg))] text-[hsl(var(--info))]">
+          <Inbox className="size-6" />
         </div>
-        <strong className="state-shell-title">{emptyTitle}</strong>
-        <p className="state-shell-description">{emptyDescription}</p>
-        {action ? <div className="state-shell-actions">{action}</div> : null}
+        <strong className="text-lg font-bold text-foreground">{emptyTitle}</strong>
+        <p className="max-w-[420px] text-sm leading-relaxed text-muted-foreground">{emptyDescription}</p>
+        {action ? <div className="flex items-center justify-center gap-2.5 flex-wrap">{action}</div> : null}
       </div>
     )
   }
