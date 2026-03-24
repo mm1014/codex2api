@@ -224,6 +224,8 @@ export default function Accounts() {
                       <TableHead className="text-[13px] font-semibold">邮箱</TableHead>
                       <TableHead className="text-[13px] font-semibold">套餐</TableHead>
                       <TableHead className="text-[13px] font-semibold">状态</TableHead>
+                      <TableHead className="text-[13px] font-semibold">请求统计</TableHead>
+                      <TableHead className="text-[13px] font-semibold">用量</TableHead>
                       <TableHead className="text-[13px] font-semibold">更新时间</TableHead>
                       <TableHead className="text-[13px] font-semibold text-right">操作</TableHead>
                     </TableRow>
@@ -243,6 +245,34 @@ export default function Accounts() {
                         <TableCell className="text-[14px] text-muted-foreground">{account.email || '-'}</TableCell>
                         <TableCell className="text-[14px] font-mono">{account.plan_type || '-'}</TableCell>
                         <TableCell><StatusBadge status={account.status} /></TableCell>
+                        <TableCell>
+                          <div className="flex items-center gap-2 text-[13px]">
+                            <span className="text-emerald-600 font-medium">{account.success_requests ?? 0}</span>
+                            <span className="text-muted-foreground">/</span>
+                            <span className="text-red-500 font-medium">{account.error_requests ?? 0}</span>
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          {(account.plan_type?.toLowerCase() === 'free' && (account.usage_percent_7d ?? 0) > 0) ? (
+                            <div className="w-24">
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="text-[12px] font-medium">{(account.usage_percent_7d ?? 0).toFixed(1)}%</span>
+                              </div>
+                              <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+                                <div
+                                  className={`h-full rounded-full transition-all ${
+                                    (account.usage_percent_7d ?? 0) >= 90 ? 'bg-red-500' :
+                                    (account.usage_percent_7d ?? 0) >= 70 ? 'bg-amber-500' :
+                                    'bg-emerald-500'
+                                  }`}
+                                  style={{ width: `${Math.min(100, account.usage_percent_7d ?? 0)}%` }}
+                                />
+                              </div>
+                            </div>
+                          ) : (
+                            <span className="text-[13px] text-muted-foreground">-</span>
+                          )}
+                        </TableCell>
                         <TableCell className="text-[14px] text-muted-foreground">{formatRelativeTime(account.updated_at)}</TableCell>
                         <TableCell className="text-right">
                           <div className="flex items-center gap-1.5 justify-end">

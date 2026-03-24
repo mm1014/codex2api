@@ -110,6 +110,28 @@ func New(dsn string) (*DB, error) {
 	// 启动批量写入后台协程
 	db.startLogFlusher()
 
+	_, err = db.conn.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS usage_stats_baseline (
+			id              INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+			total_requests  BIGINT NOT NULL DEFAULT 0,
+			total_tokens    BIGINT NOT NULL DEFAULT 0,
+			prompt_tokens   BIGINT NOT NULL DEFAULT 0,
+			completion_tokens BIGINT NOT NULL DEFAULT 0,
+			cached_tokens   BIGINT NOT NULL DEFAULT 0
+		)
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("创建 usage_stats_baseline 表失败: %w", err)
+	}
+
+	// 确保 baseline 行存在
+	_, err = db.conn.ExecContext(ctx, `
+		INSERT INTO usage_stats_baseline (id) VALUES (1) ON CONFLICT DO NOTHING
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("初始化 usage_stats_baseline 失败: %w", err)
+	}
+
 	return db, nil
 }
 
@@ -404,7 +426,7 @@ type UsageStats struct {
 	ErrorRate         float64 `json:"error_rate"`
 }
 
-// GetUsageStats 获取使用统计（单条 SQL，避免 5 次查询）
+// GetUsageStats 获取使用统计（基线 + 当前日志）
 func (db *DB) GetUsageStats(ctx context.Context) (*UsageStats, error) {
 	stats := &UsageStats{}
 
@@ -441,6 +463,19 @@ func (db *DB) GetUsageStats(ctx context.Context) (*UsageStats, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// 加上基线值（清空日志前保存的累计值）
+	var bReq, bTok, bPrompt, bComp, bCached int64
+	_ = db.conn.QueryRowContext(ctx, `
+		SELECT total_requests, total_tokens, prompt_tokens, completion_tokens, cached_tokens
+		FROM usage_stats_baseline WHERE id = 1
+	`).Scan(&bReq, &bTok, &bPrompt, &bComp, &bCached)
+
+	stats.TotalRequests += bReq
+	stats.TotalTokens += bTok
+	stats.TotalPrompt += bPrompt
+	stats.TotalCompletion += bComp
+	stats.TotalCachedTokens += bCached
 
 	if stats.TodayRequests > 0 {
 		stats.ErrorRate = float64(todayErrors) / float64(stats.TodayRequests) * 100
@@ -481,10 +516,57 @@ func (db *DB) ListRecentUsageLogs(ctx context.Context, limit int) ([]*UsageLog, 
 	return logs, rows.Err()
 }
 
-// ClearUsageLogs 清空所有使用日志
+// ClearUsageLogs 清空所有使用日志（先快照累计值到基线表）
 func (db *DB) ClearUsageLogs(ctx context.Context) error {
-	_, err := db.conn.ExecContext(ctx, `TRUNCATE TABLE usage_logs RESTART IDENTITY`)
+	// 先将当前日志的累计值叠加到基线表
+	_, err := db.conn.ExecContext(ctx, `
+		UPDATE usage_stats_baseline SET
+			total_requests  = total_requests  + COALESCE((SELECT COUNT(*) FROM usage_logs), 0),
+			total_tokens    = total_tokens    + COALESCE((SELECT SUM(total_tokens) FROM usage_logs), 0),
+			prompt_tokens   = prompt_tokens   + COALESCE((SELECT SUM(prompt_tokens) FROM usage_logs), 0),
+			completion_tokens = completion_tokens + COALESCE((SELECT SUM(completion_tokens) FROM usage_logs), 0),
+			cached_tokens   = cached_tokens   + COALESCE((SELECT SUM(cached_tokens) FROM usage_logs), 0)
+		WHERE id = 1
+	`)
+	if err != nil {
+		return fmt.Errorf("快照统计基线失败: %w", err)
+	}
+
+	// 再清空日志
+	_, err = db.conn.ExecContext(ctx, `TRUNCATE TABLE usage_logs RESTART IDENTITY`)
 	return err
+}
+
+// AccountRequestCount 每个账号的请求统计
+type AccountRequestCount struct {
+	AccountID    int64
+	SuccessCount int64
+	ErrorCount   int64
+}
+
+// GetAccountRequestCounts 按 account_id 聚合成功/失败请求数
+func (db *DB) GetAccountRequestCounts(ctx context.Context) (map[int64]*AccountRequestCount, error) {
+	query := `
+	SELECT account_id,
+		COUNT(*) FILTER (WHERE status_code < 400) AS success_count,
+		COUNT(*) FILTER (WHERE status_code >= 400) AS error_count
+	FROM usage_logs GROUP BY account_id
+	`
+	rows, err := db.conn.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[int64]*AccountRequestCount)
+	for rows.Next() {
+		rc := &AccountRequestCount{}
+		if err := rows.Scan(&rc.AccountID, &rc.SuccessCount, &rc.ErrorCount); err != nil {
+			return nil, err
+		}
+		result[rc.AccountID] = rc
+	}
+	return result, rows.Err()
 }
 
 // ==================== Accounts ====================

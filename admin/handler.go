@@ -87,16 +87,19 @@ func (h *Handler) GetStats(c *gin.Context) {
 // ==================== Accounts ====================
 
 type accountResponse struct {
-	ID             int64  `json:"id"`
-	Name           string `json:"name"`
-	Email          string `json:"email"`
-	PlanType       string `json:"plan_type"`
-	Status         string `json:"status"`
-	ProxyURL       string `json:"proxy_url"`
-	UpdatedAt      string `json:"updated_at"`
-	ActiveRequests int64  `json:"active_requests"`
-	TotalRequests  int64  `json:"total_requests"`
-	LastUsedAt     string `json:"last_used_at"`
+	ID              int64   `json:"id"`
+	Name            string  `json:"name"`
+	Email           string  `json:"email"`
+	PlanType        string  `json:"plan_type"`
+	Status          string  `json:"status"`
+	ProxyURL        string  `json:"proxy_url"`
+	UpdatedAt       string  `json:"updated_at"`
+	ActiveRequests  int64   `json:"active_requests"`
+	TotalRequests   int64   `json:"total_requests"`
+	LastUsedAt      string  `json:"last_used_at"`
+	SuccessRequests int64   `json:"success_requests"`
+	ErrorRequests   int64   `json:"error_requests"`
+	UsagePercent7d  float64 `json:"usage_percent_7d"`
 }
 
 // ListAccounts 获取账号列表
@@ -116,6 +119,9 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 		accountMap[acc.DBID] = acc
 	}
 
+	// 获取每账号的请求统计
+	reqCounts, _ := h.db.GetAccountRequestCounts(ctx)
+
 	accounts := make([]accountResponse, 0, len(rows))
 	for _, row := range rows {
 		resp := accountResponse{
@@ -130,9 +136,16 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 		if acc, ok := accountMap[row.ID]; ok {
 			resp.ActiveRequests = acc.GetActiveRequests()
 			resp.TotalRequests = acc.GetTotalRequests()
+			resp.UsagePercent7d = acc.GetUsagePercent7d()
 			if t := acc.GetLastUsedAt(); !t.IsZero() {
 				resp.LastUsedAt = t.Format(time.RFC3339)
 			}
+			// 使用运行时状态（优先于 DB 状态）
+			resp.Status = acc.RuntimeStatus()
+		}
+		if rc, ok := reqCounts[row.ID]; ok {
+			resp.SuccessRequests = rc.SuccessCount
+			resp.ErrorRequests = rc.ErrorCount
 		}
 		accounts = append(accounts, resp)
 	}

@@ -36,7 +36,11 @@ type Account struct {
 	ProxyURL     string
 	Status       AccountStatus
 	CooldownUtil time.Time
+	CooldownReason string // rate_limited / unauthorized / 空
 	ErrorMsg     string
+
+	// 用量进度（从 Codex 响应头被动解析）
+	UsagePercent7d float64 // 7d 窗口使用率 0-100+
 
 	// 高并发调度指标（原子操作，无需锁）
 	ActiveRequests int64 // 当前并发请求数
@@ -85,6 +89,60 @@ func (a *Account) SetCooldown(duration time.Duration) {
 	defer a.mu.Unlock()
 	a.Status = StatusCooldown
 	a.CooldownUtil = time.Now().Add(duration)
+	a.CooldownReason = ""
+}
+
+// SetCooldownWithReason 设置冷却时间（带原因）
+func (a *Account) SetCooldownWithReason(duration time.Duration, reason string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.Status = StatusCooldown
+	a.CooldownUtil = time.Now().Add(duration)
+	a.CooldownReason = reason
+}
+
+// GetCooldownReason 获取冷却原因
+func (a *Account) GetCooldownReason() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.CooldownReason
+}
+
+// RuntimeStatus 返回运行时状态字符串（供 admin API 使用）
+func (a *Account) RuntimeStatus() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	switch a.Status {
+	case StatusError:
+		return "error"
+	case StatusCooldown:
+		if time.Now().Before(a.CooldownUtil) {
+			if a.CooldownReason != "" {
+				return a.CooldownReason
+			}
+			return "cooldown"
+		}
+		return "active" // 冷却过期，已恢复
+	default:
+		if a.AccessToken != "" {
+			return "active"
+		}
+		return "error"
+	}
+}
+
+// SetUsagePercent7d 更新 7d 用量百分比
+func (a *Account) SetUsagePercent7d(pct float64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.UsagePercent7d = pct
+}
+
+// GetUsagePercent7d 获取 7d 用量百分比
+func (a *Account) GetUsagePercent7d() float64 {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.UsagePercent7d
 }
 
 // GetActiveRequests 获取当前并发数

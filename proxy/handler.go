@@ -384,6 +384,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		h.logUsage(logInput)
 
 		resp.Body.Close()
+		parseCodexUsageHeaders(resp, account)
 		h.store.Release(account)
 		return
 	}
@@ -599,6 +600,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		h.logUsage(logInput)
 
 		resp.Body.Close()
+		parseCodexUsageHeaders(resp, account)
 		h.store.Release(account)
 		return
 	}
@@ -727,10 +729,61 @@ func (h *Handler) applyCooldown(account *auth.Account, statusCode int, body []by
 			cooldown = 15 * time.Minute
 		}
 		log.Printf("账号 %d 被限速，冷却 %v", account.ID(), cooldown)
-		account.SetCooldown(cooldown)
+		account.SetCooldownWithReason(cooldown, "rate_limited")
 	case http.StatusUnauthorized:
-		account.SetCooldown(5 * time.Minute)
+		account.SetCooldownWithReason(5*time.Minute, "unauthorized")
 	}
+}
+
+// parseCodexUsageHeaders 从 Codex 响应头解析 7d 用量百分比
+func parseCodexUsageHeaders(resp *http.Response, account *auth.Account) {
+	if resp == nil {
+		return
+	}
+
+	// 解析 primary 和 secondary 窗口
+	primaryUsed := resp.Header.Get("x-codex-primary-used-percent")
+	primaryWindow := resp.Header.Get("x-codex-primary-window-minutes")
+	secondaryUsed := resp.Header.Get("x-codex-secondary-used-percent")
+	secondaryWindow := resp.Header.Get("x-codex-secondary-window-minutes")
+
+	// 归一化：找到 7d 窗口（window_minutes > 360 分钟，即 > 6h）
+	var used7dStr string
+	if primaryWindow != "" && secondaryWindow != "" {
+		// 两个都有，大的是 7d
+		pw := parseFloat(primaryWindow)
+		sw := parseFloat(secondaryWindow)
+		if pw >= sw {
+			used7dStr = primaryUsed
+		} else {
+			used7dStr = secondaryUsed
+		}
+	} else if primaryUsed != "" {
+		// 只有 primary
+		pw := parseFloat(primaryWindow)
+		if pw > 360 || primaryWindow == "" {
+			used7dStr = primaryUsed // 默认 primary = 7d
+		}
+	} else if secondaryUsed != "" {
+		sw := parseFloat(secondaryWindow)
+		if sw > 360 {
+			used7dStr = secondaryUsed
+		}
+	}
+
+	if used7dStr != "" {
+		pct := parseFloat(used7dStr)
+		account.SetUsagePercent7d(pct)
+	}
+}
+
+func parseFloat(s string) float64 {
+	if s == "" {
+		return 0
+	}
+	v := 0.0
+	fmt.Sscanf(s, "%f", &v)
+	return v
 }
 
 // sendUpstreamError 发送上游错误响应给客户端

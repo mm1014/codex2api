@@ -26,6 +26,9 @@ export interface AccountRow {
   active_requests?: number
   total_requests?: number
   last_used_at?: ISODateString
+  success_requests?: number
+  error_requests?: number
+  usage_percent_7d?: number
 }
 
 export type AccountsResponse = ApiListResponse<'accounts', AccountRow>

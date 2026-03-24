@@ -8,6 +8,8 @@ const statusConfig: Record<string, { variant: 'default' | 'secondary' | 'destruc
   active: { variant: 'default', label: '可用', dotColor: 'bg-emerald-500' },
   ready: { variant: 'default', label: '就绪', dotColor: 'bg-emerald-500' },
   cooldown: { variant: 'secondary', label: '冷却中', dotColor: 'bg-amber-500' },
+  rate_limited: { variant: 'secondary', label: '限流', dotColor: 'bg-yellow-500' },
+  unauthorized: { variant: 'destructive', label: '封禁', dotColor: 'bg-red-500' },
   error: { variant: 'destructive', label: '错误', dotColor: 'bg-red-400' },
   paused: { variant: 'outline', label: '已暂停', dotColor: 'bg-blue-500' },
 }
