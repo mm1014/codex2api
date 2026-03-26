@@ -292,6 +292,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		return
 	}
 
+	rawBody = normalizeServiceTierField(rawBody)
 	isStream := gjson.GetBytes(rawBody, "stream").Bool()
 	sessionID := ResolveSessionID(c.GetHeader("Authorization"), rawBody)
 	reasoningEffort := extractReasoningEffort(rawBody)
@@ -318,12 +319,12 @@ func (h *Handler) Responses(c *gin.Context) {
 		codexBody, _ = sjson.SetBytes(codexBody, "reasoning.effort", re.String())
 	}
 
-	// 删除 Codex 不支持的参数（客户端可能传入）
+	// 删除 Codex 不支持的参数（保留 service_tier 供上游 fast 调度）
 	unsupportedFields := []string{
 		"max_output_tokens", "max_tokens", "max_completion_tokens",
 		"temperature", "top_p", "frequency_penalty", "presence_penalty",
 		"logprobs", "top_logprobs", "n", "seed", "stop", "user",
-		"logit_bias", "response_format", "service_tier", "serviceTier",
+		"logit_bias", "response_format", "serviceTier",
 		"stream_options", "reasoning_effort", "truncation", "context_management",
 		"disable_response_storage", "verbosity",
 	}
@@ -550,7 +551,8 @@ func (h *Handler) Responses(c *gin.Context) {
 			}
 		}
 
-		c.Set("x-service-tier", actualServiceTier)
+		resolvedServiceTier := resolveServiceTier(actualServiceTier, serviceTier)
+		c.Set("x-service-tier", resolvedServiceTier)
 
 		logInput := &database.UsageLogInput{
 			AccountID:        account.ID(),
@@ -563,7 +565,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			InboundEndpoint:  "/v1/responses",
 			UpstreamEndpoint: "/v1/responses",
 			Stream:           isStream,
-			ServiceTier:      actualServiceTier,
+			ServiceTier:      resolvedServiceTier,
 		}
 		if usage != nil {
 			logInput.PromptTokens = usage.PromptTokens
@@ -867,7 +869,8 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			}
 		}
 
-		c.Set("x-service-tier", actualServiceTier)
+		resolvedServiceTier := resolveServiceTier(actualServiceTier, serviceTier)
+		c.Set("x-service-tier", resolvedServiceTier)
 
 		logInput := &database.UsageLogInput{
 			AccountID:        account.ID(),
@@ -880,7 +883,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			InboundEndpoint:  "/v1/chat/completions",
 			UpstreamEndpoint: "/v1/responses",
 			Stream:           isStream,
-			ServiceTier:      actualServiceTier,
+			ServiceTier:      resolvedServiceTier,
 		}
 		if usage != nil {
 			logInput.PromptTokens = usage.PromptTokens
@@ -1121,10 +1124,10 @@ func parseCodexUsageHeaders(resp *http.Response, account *auth.Account) (float64
 	secondaryResetStr := resp.Header.Get("x-codex-secondary-reset-after-seconds")
 
 	type windowData struct {
-		usedPct  float64
-		resetSec float64
+		usedPct   float64
+		resetSec  float64
 		windowMin float64
-		valid    bool
+		valid     bool
 	}
 
 	parseWindow := func(usedStr, windowStr, resetStr string) windowData {

@@ -31,12 +31,15 @@ func TranslateRequest(rawJSON []byte) ([]byte, error) {
 		result, _ = sjson.SetBytes(result, "reasoning.effort", re.String())
 	}
 
-	// 4. 删除 Codex 不支持的字段
+	// 4. 统一 service tier 字段命名，保留给上游用于 fast 调度
+	result = normalizeServiceTierField(result)
+
+	// 5. 删除 Codex 不支持的字段
 	unsupportedFields := []string{
 		"max_tokens", "max_completion_tokens", "temperature", "top_p",
 		"frequency_penalty", "presence_penalty", "logprobs", "top_logprobs",
 		"n", "seed", "stop", "user", "logit_bias", "response_format",
-		"service_tier", "serviceTier", "stream_options", "truncation",
+		"serviceTier", "stream_options", "truncation",
 		"context_management", "disable_response_storage", "verbosity",
 		"reasoning_effort",
 	}
@@ -44,19 +47,41 @@ func TranslateRequest(rawJSON []byte) ([]byte, error) {
 		result, _ = sjson.DeleteBytes(result, field)
 	}
 
-	// 5. 转换 tools 格式: OpenAI Chat {type, function:{name,description,parameters}} → Codex {type, name, description, parameters}
+	// 6. 转换 tools 格式: OpenAI Chat {type, function:{name,description,parameters}} → Codex {type, name, description, parameters}
 	result = convertToolsFormat(result)
 
-	// 6. 删除 Codex 不支持的 tool 相关字段
+	// 7. 删除 Codex 不支持的 tool 相关字段
 	result, _ = sjson.DeleteBytes(result, "tool_choice")
 
-	// 7. system → developer 角色转换
+	// 8. system → developer 角色转换
 	result = convertSystemRoleToDeveloper(result)
 
-	// 8. 添加 include
+	// 9. 添加 include
 	result, _ = sjson.SetBytes(result, "include", []string{"reasoning.encrypted_content"})
 
 	return result, nil
+}
+
+func normalizeServiceTierField(body []byte) []byte {
+	tier := strings.TrimSpace(gjson.GetBytes(body, "service_tier").String())
+	if tier == "" {
+		tier = strings.TrimSpace(gjson.GetBytes(body, "serviceTier").String())
+	}
+	if tier == "" {
+		return body
+	}
+
+	body, _ = sjson.SetBytes(body, "service_tier", tier)
+	body, _ = sjson.DeleteBytes(body, "serviceTier")
+	return body
+}
+
+func resolveServiceTier(actualTier, requestedTier string) string {
+	actualTier = strings.TrimSpace(actualTier)
+	if actualTier != "" {
+		return actualTier
+	}
+	return strings.TrimSpace(requestedTier)
 }
 
 // convertMessagesToInput 将 OpenAI messages 格式转换为 Codex input 格式
