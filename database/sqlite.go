@@ -79,6 +79,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 			auto_clean_rate_limited INTEGER DEFAULT 0,
 			admin_secret TEXT DEFAULT '',
 			auto_clean_full_usage INTEGER DEFAULT 0,
+			auto_clean_full_usage_mode TEXT DEFAULT 'off',
 			auto_clean_error INTEGER DEFAULT 0,
 			auto_clean_expired INTEGER DEFAULT 0,
 			proxy_pool_enabled INTEGER DEFAULT 0,
@@ -133,6 +134,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "auto_clean_rate_limited", "INTEGER DEFAULT 0"},
 		{"system_settings", "admin_secret", "TEXT DEFAULT ''"},
 		{"system_settings", "auto_clean_full_usage", "INTEGER DEFAULT 0"},
+		{"system_settings", "auto_clean_full_usage_mode", "TEXT DEFAULT 'off'"},
 		{"system_settings", "auto_clean_error", "INTEGER DEFAULT 0"},
 		{"system_settings", "auto_clean_expired", "INTEGER DEFAULT 0"},
 		{"system_settings", "proxy_pool_enabled", "INTEGER DEFAULT 0"},
@@ -147,6 +149,16 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		if err := db.ensureSQLiteColumn(ctx, column.table, column.name, column.def); err != nil {
 			return err
 		}
+	}
+	if _, err := db.conn.ExecContext(ctx, `
+		UPDATE system_settings
+		SET auto_clean_full_usage_mode = CASE
+			WHEN COALESCE(auto_clean_full_usage, 0) != 0 THEN 'delete'
+			ELSE 'off'
+		END
+		WHERE COALESCE(auto_clean_full_usage_mode, '') = ''
+	`); err != nil {
+		return err
 	}
 
 	indexStatements := []string{

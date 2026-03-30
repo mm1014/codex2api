@@ -30,11 +30,26 @@ function maskKey(key: string): string {
   return key.slice(0, 7) + '???????' + key.slice(-4)
 }
 
+function normalizeFullUsageMode(mode: string | undefined, legacyEnabled: boolean): 'off' | 'delete' | 'wait' {
+  if (mode === 'delete' || mode === 'wait') {
+    return mode
+  }
+  if (mode === 'off') {
+    return 'off'
+  }
+  return legacyEnabled ? 'delete' : 'off'
+}
+
 export default function Settings() {
   const { t } = useTranslation()
   const booleanOptions = [
     { label: t('common.disabled'), value: 'false' },
     { label: t('common.enabled'), value: 'true' },
+  ]
+  const fullUsageModeOptions = [
+    { label: t('settings.autoCleanFullUsageModeOff'), value: 'off' },
+    { label: t('settings.autoCleanFullUsageModeDelete'), value: 'delete' },
+    { label: t('settings.autoCleanFullUsageModeWait'), value: 'wait' },
   ]
   const [newKeyName, setNewKeyName] = useState('')
   const [newKeyValue, setNewKeyValue] = useState('')
@@ -53,6 +68,7 @@ export default function Settings() {
     admin_secret: '',
     admin_auth_source: 'disabled',
     auto_clean_full_usage: false,
+    auto_clean_full_usage_mode: 'off',
     proxy_pool_enabled: false,
     fast_scheduler_enabled: false,
     max_retries: 2,
@@ -70,7 +86,12 @@ export default function Settings() {
 
   const loadSettingsData = useCallback(async () => {
     const [health, keysResponse, settings, modelsResp] = await Promise.all([api.getHealth(), api.getAPIKeys(), api.getSettings(), api.getModels()])
-    setSettingsForm(settings)
+    const fullUsageMode = normalizeFullUsageMode(settings.auto_clean_full_usage_mode, settings.auto_clean_full_usage)
+    setSettingsForm({
+      ...settings,
+      auto_clean_full_usage_mode: fullUsageMode,
+      auto_clean_full_usage: fullUsageMode !== 'off',
+    })
     setLoadedAdminSecret(settings.admin_secret ?? '')
     setModelList(modelsResp.models ?? [])
     return {
@@ -159,7 +180,12 @@ export default function Settings() {
     try {
       const adminSecretChanged = settingsForm.admin_auth_source !== 'env' && settingsForm.admin_secret !== loadedAdminSecret
       const updated = await api.updateSettings(settingsForm)
-      setSettingsForm(updated)
+      const fullUsageMode = normalizeFullUsageMode(updated.auto_clean_full_usage_mode, updated.auto_clean_full_usage)
+      setSettingsForm({
+        ...updated,
+        auto_clean_full_usage_mode: fullUsageMode,
+        auto_clean_full_usage: fullUsageMode !== 'off',
+      })
       setLoadedAdminSecret(updated.admin_secret ?? '')
       if (updated.admin_auth_source !== 'env') {
         setAdminKey(updated.admin_secret ?? '')
@@ -439,9 +465,16 @@ export default function Settings() {
               <div>
                 <label className="block mb-2 text-sm font-semibold text-muted-foreground">{t('settings.autoCleanFullUsage')}</label>
                 <Select
-                  value={settingsForm.auto_clean_full_usage ? 'true' : 'false'}
-                  onValueChange={(value) => setSettingsForm((f) => ({ ...f, auto_clean_full_usage: value === 'true' }))}
-                  options={booleanOptions}
+                  value={normalizeFullUsageMode(settingsForm.auto_clean_full_usage_mode, settingsForm.auto_clean_full_usage)}
+                  onValueChange={(value) => {
+                    const nextMode = normalizeFullUsageMode(value, false)
+                    setSettingsForm((f) => ({
+                      ...f,
+                      auto_clean_full_usage_mode: nextMode,
+                      auto_clean_full_usage: nextMode !== 'off',
+                    }))
+                  }}
+                  options={fullUsageModeOptions}
                 />
                 <p className="text-xs text-muted-foreground mt-1">{t('settings.autoCleanFullUsageDesc')}</p>
               </div>

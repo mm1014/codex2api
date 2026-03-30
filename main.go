@@ -61,15 +61,16 @@ func main() {
 		// 初次运行，保存初始安全设置到数据库
 		log.Printf("初次运行，初始化系统默认设置...")
 		settings = &database.SystemSettings{
-			MaxConcurrency:        2,
-			GlobalRPM:             0,
-			TestModel:             "gpt-5.4",
-			TestConcurrency:       50,
-			ProxyURL:              "",
-			PgMaxConns:            50,
-			RedisPoolSize:         30,
-			AutoCleanUnauthorized: false,
-			AutoCleanRateLimited:  false,
+			MaxConcurrency:         2,
+			GlobalRPM:              0,
+			TestModel:              "gpt-5.4",
+			TestConcurrency:        50,
+			ProxyURL:               "",
+			PgMaxConns:             50,
+			RedisPoolSize:          30,
+			AutoCleanUnauthorized:  false,
+			AutoCleanRateLimited:   false,
+			AutoCleanFullUsageMode: auth.AutoCleanFullUsageModeOff,
 		}
 		_ = db.UpdateSystemSettings(context.Background(), settings)
 	} else if err != nil {

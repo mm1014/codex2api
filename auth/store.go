@@ -26,6 +26,27 @@ const (
 	StatusError                         // 不可用（RT 失效等）
 )
 
+const rateLimitedProbeInterval = 4 * time.Hour
+const fullUsageWaitFallback = 12 * time.Hour
+
+const (
+	AutoCleanFullUsageModeOff    = "off"
+	AutoCleanFullUsageModeDelete = "delete"
+	AutoCleanFullUsageModeWait   = "wait"
+)
+
+// NormalizeAutoCleanFullUsageMode 规范化满用量处理模式
+func NormalizeAutoCleanFullUsageMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case AutoCleanFullUsageModeDelete:
+		return AutoCleanFullUsageModeDelete
+	case AutoCleanFullUsageModeWait:
+		return AutoCleanFullUsageModeWait
+	default:
+		return AutoCleanFullUsageModeOff
+	}
+}
+
 // AccountHealthTier 账号健康层级（仅用于调度优先级，不直接暴露给外部 API）
 type AccountHealthTier string
 
@@ -77,6 +98,7 @@ type Account struct {
 	LastTimeoutAt           time.Time
 	LastServerErrorAt       time.Time
 	LastRecoveryProbeAt     time.Time
+	LastRateLimitedProbeAt  time.Time
 
 	// 滑动窗口成功率（最近 N 次请求）
 	RecentResults    [20]uint8 // 1=成功, 0=失败
@@ -592,6 +614,12 @@ func (a *Account) NeedsUsageProbe(maxAge time.Duration) bool {
 		return false
 	}
 	if a.Status == StatusCooldown && a.CooldownReason == "rate_limited" {
+		if time.Now().Before(a.CooldownUtil) {
+			if !a.LastRateLimitedProbeAt.IsZero() && time.Since(a.LastRateLimitedProbeAt) < rateLimitedProbeInterval {
+				return false
+			}
+			return true
+		}
 		return true
 	}
 	if !a.UsagePercent7dValid || a.UsageUpdatedAt.IsZero() {
@@ -608,6 +636,9 @@ func (a *Account) TryBeginUsageProbe() bool {
 		return false
 	}
 	a.usageProbeInFlight = true
+	if a.Status == StatusCooldown && a.CooldownReason == "rate_limited" {
+		a.LastRateLimitedProbeAt = time.Now()
+	}
 	return true
 }
 
@@ -678,27 +709,27 @@ func (a *Account) GetLastUsedAt() time.Time {
 
 // Store 多账号管理器（数据库 + Token 缓存）
 type Store struct {
-	mu                    sync.RWMutex
-	accounts              []*Account
-	globalProxy           string
-	maxConcurrency        int64        // 每账号最大并发数
-	testConcurrency       int64        // 批量测试并发数
-	testModel             atomic.Value // 测试连接使用的模型（string）
-	db                    *database.DB
-	tokenCache            cache.TokenCache
-	usageProbeMu          sync.RWMutex
-	usageProbe            func(context.Context, *Account) error
-	usageProbeBatch       atomic.Bool
-	recoveryProbeBatch    atomic.Bool
-	autoCleanUnauthorized atomic.Bool
-	autoCleanRateLimited  atomic.Bool
-	autoCleanFullUsage    atomic.Bool
-	autoCleanError        atomic.Bool
-	autoCleanExpired      atomic.Bool
-	autoCleanupBatch      atomic.Bool
-	maxRetries            int64 // 请求失败最大重试次数（换号重试）
-	stopCh                chan struct{}
-	wg                    sync.WaitGroup
+	mu                     sync.RWMutex
+	accounts               []*Account
+	globalProxy            string
+	maxConcurrency         int64        // 每账号最大并发数
+	testConcurrency        int64        // 批量测试并发数
+	testModel              atomic.Value // 测试连接使用的模型（string）
+	db                     *database.DB
+	tokenCache             cache.TokenCache
+	usageProbeMu           sync.RWMutex
+	usageProbe             func(context.Context, *Account) error
+	usageProbeBatch        atomic.Bool
+	recoveryProbeBatch     atomic.Bool
+	autoCleanUnauthorized  atomic.Bool
+	autoCleanRateLimited   atomic.Bool
+	autoCleanFullUsageMode atomic.Value // string: off / delete / wait
+	autoCleanError         atomic.Bool
+	autoCleanExpired       atomic.Bool
+	autoCleanupBatch       atomic.Bool
+	maxRetries             int64 // 请求失败最大重试次数（换号重试）
+	stopCh                 chan struct{}
+	wg                     sync.WaitGroup
 
 	// 代理池
 	proxyPool        []string // 已启用的代理 URL 列表
@@ -737,10 +768,11 @@ func truthyEnv(v string) bool {
 func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSettings) *Store {
 	if settings == nil {
 		settings = &database.SystemSettings{
-			MaxConcurrency:  2,
-			TestConcurrency: 50,
-			TestModel:       "gpt-5.4",
-			ProxyURL:        "",
+			MaxConcurrency:         2,
+			TestConcurrency:        50,
+			TestModel:              "gpt-5.4",
+			ProxyURL:               "",
+			AutoCleanFullUsageMode: AutoCleanFullUsageModeOff,
 		}
 	}
 	s := &Store{
@@ -755,7 +787,11 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	s.testModel.Store(settings.TestModel)
 	s.autoCleanUnauthorized.Store(settings.AutoCleanUnauthorized)
 	s.autoCleanRateLimited.Store(settings.AutoCleanRateLimited)
-	s.autoCleanFullUsage.Store(settings.AutoCleanFullUsage)
+	fullUsageMode := NormalizeAutoCleanFullUsageMode(settings.AutoCleanFullUsageMode)
+	if fullUsageMode == AutoCleanFullUsageModeOff && settings.AutoCleanFullUsage {
+		fullUsageMode = AutoCleanFullUsageModeDelete
+	}
+	s.autoCleanFullUsageMode.Store(fullUsageMode)
 	s.autoCleanError.Store(settings.AutoCleanError)
 	s.autoCleanExpired.Store(settings.AutoCleanExpired)
 	retries := int64(settings.MaxRetries)
@@ -943,14 +979,33 @@ func (s *Store) SetAutoCleanRateLimited(enabled bool) {
 	s.autoCleanRateLimited.Store(enabled)
 }
 
-// GetAutoCleanFullUsage 获取是否自动清理用量满的账号
-func (s *Store) GetAutoCleanFullUsage() bool {
-	return s.autoCleanFullUsage.Load()
+// GetAutoCleanFullUsageMode 获取满用量账号处理模式（off / delete / wait）
+func (s *Store) GetAutoCleanFullUsageMode() string {
+	v := s.autoCleanFullUsageMode.Load()
+	mode, ok := v.(string)
+	if !ok {
+		return AutoCleanFullUsageModeOff
+	}
+	return NormalizeAutoCleanFullUsageMode(mode)
 }
 
-// SetAutoCleanFullUsage 设置是否自动清理用量满的账号
+// SetAutoCleanFullUsageMode 设置满用量账号处理模式
+func (s *Store) SetAutoCleanFullUsageMode(mode string) {
+	s.autoCleanFullUsageMode.Store(NormalizeAutoCleanFullUsageMode(mode))
+}
+
+// GetAutoCleanFullUsage 获取是否启用满用量账号处理（兼容旧版布尔开关）
+func (s *Store) GetAutoCleanFullUsage() bool {
+	return s.GetAutoCleanFullUsageMode() != AutoCleanFullUsageModeOff
+}
+
+// SetAutoCleanFullUsage 设置是否启用满用量账号处理（兼容旧版布尔开关）
 func (s *Store) SetAutoCleanFullUsage(enabled bool) {
-	s.autoCleanFullUsage.Store(enabled)
+	if enabled {
+		s.SetAutoCleanFullUsageMode(AutoCleanFullUsageModeDelete)
+		return
+	}
+	s.SetAutoCleanFullUsageMode(AutoCleanFullUsageModeOff)
 }
 
 // GetAutoCleanError 获取是否自动清理 error 账号
@@ -1125,8 +1180,11 @@ func (s *Store) StartBackgroundRefresh() {
 			case <-autoCleanupTicker.C:
 				s.TriggerAutoCleanupAsync()
 			case <-fullUsageCleanupTicker.C:
-				if s.GetAutoCleanFullUsage() {
+				switch s.GetAutoCleanFullUsageMode() {
+				case AutoCleanFullUsageModeDelete:
 					go s.CleanFullUsageAccounts(context.Background())
+				case AutoCleanFullUsageModeWait:
+					go s.WaitFullUsageAccounts(context.Background())
 				}
 			case <-expiredCleanupTicker.C:
 				// 每 15 分钟清理加入超过 30 分钟的账号（需开启开关）
@@ -1426,6 +1484,7 @@ func (s *Store) MarkCooldown(acc *Account, duration time.Duration, reason string
 		acc.HealthTier = HealthTierBanned
 	case "rate_limited":
 		acc.LastRateLimitedAt = now
+		acc.LastRateLimitedProbeAt = now
 		acc.LastFailureAt = now
 		acc.FailureStreak++
 		acc.SuccessStreak = 0
@@ -1654,6 +1713,65 @@ func (s *Store) runAutoCleanupSweep(ctx context.Context) {
 	if cleanedUnauthorized > 0 || cleanedRateLimited > 0 || cleanedError > 0 {
 		log.Printf("自动清理完成: unauthorized=%d, rate_limited=%d, error=%d", cleanedUnauthorized, cleanedRateLimited, cleanedError)
 	}
+}
+
+// WaitFullUsageAccounts 将用量 >= 100% 的账号切换为等待模式（冷却到重置时间）
+func (s *Store) WaitFullUsageAccounts(ctx context.Context) int {
+	accounts := s.Accounts()
+	waited := 0
+	now := time.Now()
+
+	for _, acc := range accounts {
+		select {
+		case <-ctx.Done():
+			return waited
+		default:
+		}
+		if acc == nil {
+			continue
+		}
+		runtimeStatus := acc.RuntimeStatus()
+		if runtimeStatus == "error" || runtimeStatus == "unauthorized" {
+			continue
+		}
+
+		// 跳过正在处理请求的账号
+		if atomic.LoadInt64(&acc.ActiveRequests) > 0 {
+			continue
+		}
+
+		pct, valid := acc.GetUsagePercent7d()
+		if !valid || pct < 100.0 {
+			continue
+		}
+
+		// 已在冷却中则不重复打标，避免每 5 分钟重复覆盖
+		if acc.HasActiveCooldown() {
+			continue
+		}
+
+		waitUntil := now.Add(fullUsageWaitFallback)
+		if resetAt := acc.GetReset7dAt(); !resetAt.IsZero() && resetAt.After(now) {
+			waitUntil = resetAt
+		}
+
+		waitDuration := waitUntil.Sub(time.Now())
+		if waitDuration < time.Minute {
+			waitDuration = time.Minute
+		}
+
+		s.MarkCooldown(acc, waitDuration, "full_usage")
+		if s.db != nil {
+			s.db.InsertAccountEventAsync(acc.DBID, "cooldown", "full_usage_wait")
+		}
+		log.Printf("[账号 %d] 用量 %.1f%% 已满，进入等待模式至 %s (email=%s)", acc.DBID, pct, waitUntil.Format(time.RFC3339), acc.Email)
+		waited++
+	}
+
+	if waited > 0 {
+		log.Printf("满用量等待模式处理完成: 共标记 %d 个账号", waited)
+	}
+	return waited
 }
 
 // CleanFullUsageAccounts 清理用量达到 100% 的账号（跳过正在处理请求的账号）

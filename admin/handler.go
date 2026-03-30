@@ -1675,49 +1675,51 @@ func (h *Handler) DeleteAPIKey(c *gin.Context) {
 // ==================== Settings ====================
 
 type settingsResponse struct {
-	MaxConcurrency        int    `json:"max_concurrency"`
-	GlobalRPM             int    `json:"global_rpm"`
-	TestModel             string `json:"test_model"`
-	TestConcurrency       int    `json:"test_concurrency"`
-	ProxyURL              string `json:"proxy_url"`
-	PgMaxConns            int    `json:"pg_max_conns"`
-	RedisPoolSize         int    `json:"redis_pool_size"`
-	AutoCleanUnauthorized bool   `json:"auto_clean_unauthorized"`
-	AutoCleanRateLimited  bool   `json:"auto_clean_rate_limited"`
-	AdminSecret           string `json:"admin_secret"`
-	AdminAuthSource       string `json:"admin_auth_source"`
-	AutoCleanFullUsage    bool   `json:"auto_clean_full_usage"`
-	AutoCleanError        bool   `json:"auto_clean_error"`
-	AutoCleanExpired      bool   `json:"auto_clean_expired"`
-	ProxyPoolEnabled      bool   `json:"proxy_pool_enabled"`
-	FastSchedulerEnabled  bool   `json:"fast_scheduler_enabled"`
-	MaxRetries            int    `json:"max_retries"`
-	AllowRemoteMigration  bool   `json:"allow_remote_migration"`
-	DatabaseDriver        string `json:"database_driver"`
-	DatabaseLabel         string `json:"database_label"`
-	CacheDriver           string `json:"cache_driver"`
-	CacheLabel            string `json:"cache_label"`
-	ExpiredCleaned        int    `json:"expired_cleaned,omitempty"`
+	MaxConcurrency         int    `json:"max_concurrency"`
+	GlobalRPM              int    `json:"global_rpm"`
+	TestModel              string `json:"test_model"`
+	TestConcurrency        int    `json:"test_concurrency"`
+	ProxyURL               string `json:"proxy_url"`
+	PgMaxConns             int    `json:"pg_max_conns"`
+	RedisPoolSize          int    `json:"redis_pool_size"`
+	AutoCleanUnauthorized  bool   `json:"auto_clean_unauthorized"`
+	AutoCleanRateLimited   bool   `json:"auto_clean_rate_limited"`
+	AdminSecret            string `json:"admin_secret"`
+	AdminAuthSource        string `json:"admin_auth_source"`
+	AutoCleanFullUsage     bool   `json:"auto_clean_full_usage"`
+	AutoCleanFullUsageMode string `json:"auto_clean_full_usage_mode"`
+	AutoCleanError         bool   `json:"auto_clean_error"`
+	AutoCleanExpired       bool   `json:"auto_clean_expired"`
+	ProxyPoolEnabled       bool   `json:"proxy_pool_enabled"`
+	FastSchedulerEnabled   bool   `json:"fast_scheduler_enabled"`
+	MaxRetries             int    `json:"max_retries"`
+	AllowRemoteMigration   bool   `json:"allow_remote_migration"`
+	DatabaseDriver         string `json:"database_driver"`
+	DatabaseLabel          string `json:"database_label"`
+	CacheDriver            string `json:"cache_driver"`
+	CacheLabel             string `json:"cache_label"`
+	ExpiredCleaned         int    `json:"expired_cleaned,omitempty"`
 }
 
 type updateSettingsReq struct {
-	MaxConcurrency        *int    `json:"max_concurrency"`
-	GlobalRPM             *int    `json:"global_rpm"`
-	TestModel             *string `json:"test_model"`
-	TestConcurrency       *int    `json:"test_concurrency"`
-	ProxyURL              *string `json:"proxy_url"`
-	PgMaxConns            *int    `json:"pg_max_conns"`
-	RedisPoolSize         *int    `json:"redis_pool_size"`
-	AutoCleanUnauthorized *bool   `json:"auto_clean_unauthorized"`
-	AutoCleanRateLimited  *bool   `json:"auto_clean_rate_limited"`
-	AdminSecret           *string `json:"admin_secret"`
-	AutoCleanFullUsage    *bool   `json:"auto_clean_full_usage"`
-	AutoCleanError        *bool   `json:"auto_clean_error"`
-	AutoCleanExpired      *bool   `json:"auto_clean_expired"`
-	ProxyPoolEnabled      *bool   `json:"proxy_pool_enabled"`
-	FastSchedulerEnabled  *bool   `json:"fast_scheduler_enabled"`
-	MaxRetries            *int    `json:"max_retries"`
-	AllowRemoteMigration  *bool   `json:"allow_remote_migration"`
+	MaxConcurrency         *int    `json:"max_concurrency"`
+	GlobalRPM              *int    `json:"global_rpm"`
+	TestModel              *string `json:"test_model"`
+	TestConcurrency        *int    `json:"test_concurrency"`
+	ProxyURL               *string `json:"proxy_url"`
+	PgMaxConns             *int    `json:"pg_max_conns"`
+	RedisPoolSize          *int    `json:"redis_pool_size"`
+	AutoCleanUnauthorized  *bool   `json:"auto_clean_unauthorized"`
+	AutoCleanRateLimited   *bool   `json:"auto_clean_rate_limited"`
+	AdminSecret            *string `json:"admin_secret"`
+	AutoCleanFullUsage     *bool   `json:"auto_clean_full_usage"`
+	AutoCleanFullUsageMode *string `json:"auto_clean_full_usage_mode"`
+	AutoCleanError         *bool   `json:"auto_clean_error"`
+	AutoCleanExpired       *bool   `json:"auto_clean_expired"`
+	ProxyPoolEnabled       *bool   `json:"proxy_pool_enabled"`
+	FastSchedulerEnabled   *bool   `json:"fast_scheduler_enabled"`
+	MaxRetries             *int    `json:"max_retries"`
+	AllowRemoteMigration   *bool   `json:"allow_remote_migration"`
 }
 
 // GetSettings 获取当前系统设置
@@ -1731,28 +1733,29 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		adminSecret = dbSettings.AdminSecret
 	}
 	c.JSON(http.StatusOK, settingsResponse{
-		MaxConcurrency:        h.store.GetMaxConcurrency(),
-		GlobalRPM:             h.rateLimiter.GetRPM(),
-		TestModel:             h.store.GetTestModel(),
-		TestConcurrency:       h.store.GetTestConcurrency(),
-		ProxyURL:              h.store.GetProxyURL(),
-		PgMaxConns:            h.pgMaxConns,
-		RedisPoolSize:         h.redisPoolSize,
-		AutoCleanUnauthorized: h.store.GetAutoCleanUnauthorized(),
-		AutoCleanRateLimited:  h.store.GetAutoCleanRateLimited(),
-		AdminSecret:           adminSecret,
-		AdminAuthSource:       adminAuthSource,
-		AutoCleanFullUsage:    h.store.GetAutoCleanFullUsage(),
-		AutoCleanError:        h.store.GetAutoCleanError(),
-		AutoCleanExpired:      h.store.GetAutoCleanExpired(),
-		ProxyPoolEnabled:      h.store.GetProxyPoolEnabled(),
-		FastSchedulerEnabled:  h.store.FastSchedulerEnabled(),
-		MaxRetries:            h.store.GetMaxRetries(),
-		AllowRemoteMigration:  h.store.GetAllowRemoteMigration() && adminAuthSource != "disabled",
-		DatabaseDriver:        h.databaseDriver,
-		DatabaseLabel:         h.databaseLabel,
-		CacheDriver:           h.cacheDriver,
-		CacheLabel:            h.cacheLabel,
+		MaxConcurrency:         h.store.GetMaxConcurrency(),
+		GlobalRPM:              h.rateLimiter.GetRPM(),
+		TestModel:              h.store.GetTestModel(),
+		TestConcurrency:        h.store.GetTestConcurrency(),
+		ProxyURL:               h.store.GetProxyURL(),
+		PgMaxConns:             h.pgMaxConns,
+		RedisPoolSize:          h.redisPoolSize,
+		AutoCleanUnauthorized:  h.store.GetAutoCleanUnauthorized(),
+		AutoCleanRateLimited:   h.store.GetAutoCleanRateLimited(),
+		AdminSecret:            adminSecret,
+		AdminAuthSource:        adminAuthSource,
+		AutoCleanFullUsage:     h.store.GetAutoCleanFullUsage(),
+		AutoCleanFullUsageMode: h.store.GetAutoCleanFullUsageMode(),
+		AutoCleanError:         h.store.GetAutoCleanError(),
+		AutoCleanExpired:       h.store.GetAutoCleanExpired(),
+		ProxyPoolEnabled:       h.store.GetProxyPoolEnabled(),
+		FastSchedulerEnabled:   h.store.FastSchedulerEnabled(),
+		MaxRetries:             h.store.GetMaxRetries(),
+		AllowRemoteMigration:   h.store.GetAllowRemoteMigration() && adminAuthSource != "disabled",
+		DatabaseDriver:         h.databaseDriver,
+		DatabaseLabel:          h.databaseLabel,
+		CacheDriver:            h.cacheDriver,
+		CacheLabel:             h.cacheLabel,
 	})
 }
 
@@ -1857,9 +1860,20 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		log.Printf("设置已更新: auto_clean_rate_limited = %t", *req.AutoCleanRateLimited)
 	}
 
-	if req.AutoCleanFullUsage != nil {
+	if req.AutoCleanFullUsageMode != nil {
+		rawMode := strings.ToLower(strings.TrimSpace(*req.AutoCleanFullUsageMode))
+		switch rawMode {
+		case auth.AutoCleanFullUsageModeOff, auth.AutoCleanFullUsageModeDelete, auth.AutoCleanFullUsageModeWait:
+		default:
+			writeError(c, http.StatusBadRequest, "auto_clean_full_usage_mode 仅支持 off/delete/wait")
+			return
+		}
+		h.store.SetAutoCleanFullUsageMode(rawMode)
+		log.Printf("设置已更新: auto_clean_full_usage_mode = %s", rawMode)
+	} else if req.AutoCleanFullUsage != nil {
+		// 兼容旧版布尔开关：true=delete，false=off
 		h.store.SetAutoCleanFullUsage(*req.AutoCleanFullUsage)
-		log.Printf("设置已更新: auto_clean_full_usage = %t", *req.AutoCleanFullUsage)
+		log.Printf("设置已更新: auto_clean_full_usage(legacy) = %t -> mode=%s", *req.AutoCleanFullUsage, h.store.GetAutoCleanFullUsageMode())
 	}
 
 	if req.AutoCleanError != nil {
@@ -1915,23 +1929,24 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 
 	// 持久化保存到数据库
 	err := h.db.UpdateSystemSettings(c.Request.Context(), &database.SystemSettings{
-		MaxConcurrency:        h.store.GetMaxConcurrency(),
-		GlobalRPM:             h.rateLimiter.GetRPM(),
-		TestModel:             h.store.GetTestModel(),
-		TestConcurrency:       h.store.GetTestConcurrency(),
-		ProxyURL:              h.store.GetProxyURL(),
-		PgMaxConns:            h.pgMaxConns,
-		RedisPoolSize:         h.redisPoolSize,
-		AutoCleanUnauthorized: h.store.GetAutoCleanUnauthorized(),
-		AutoCleanRateLimited:  h.store.GetAutoCleanRateLimited(),
-		AdminSecret:           currentAdminSecret,
-		AutoCleanFullUsage:    h.store.GetAutoCleanFullUsage(),
-		AutoCleanError:        h.store.GetAutoCleanError(),
-		AutoCleanExpired:      h.store.GetAutoCleanExpired(),
-		ProxyPoolEnabled:      h.store.GetProxyPoolEnabled(),
-		FastSchedulerEnabled:  h.store.FastSchedulerEnabled(),
-		MaxRetries:            h.store.GetMaxRetries(),
-		AllowRemoteMigration:  h.store.GetAllowRemoteMigration() && hasAdminSecret,
+		MaxConcurrency:         h.store.GetMaxConcurrency(),
+		GlobalRPM:              h.rateLimiter.GetRPM(),
+		TestModel:              h.store.GetTestModel(),
+		TestConcurrency:        h.store.GetTestConcurrency(),
+		ProxyURL:               h.store.GetProxyURL(),
+		PgMaxConns:             h.pgMaxConns,
+		RedisPoolSize:          h.redisPoolSize,
+		AutoCleanUnauthorized:  h.store.GetAutoCleanUnauthorized(),
+		AutoCleanRateLimited:   h.store.GetAutoCleanRateLimited(),
+		AdminSecret:            currentAdminSecret,
+		AutoCleanFullUsage:     h.store.GetAutoCleanFullUsage(),
+		AutoCleanFullUsageMode: h.store.GetAutoCleanFullUsageMode(),
+		AutoCleanError:         h.store.GetAutoCleanError(),
+		AutoCleanExpired:       h.store.GetAutoCleanExpired(),
+		ProxyPoolEnabled:       h.store.GetProxyPoolEnabled(),
+		FastSchedulerEnabled:   h.store.FastSchedulerEnabled(),
+		MaxRetries:             h.store.GetMaxRetries(),
+		AllowRemoteMigration:   h.store.GetAllowRemoteMigration() && hasAdminSecret,
 	})
 	if err != nil {
 		log.Printf("无法持久化保存设置: %v", err)
@@ -1951,29 +1966,30 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, settingsResponse{
-		MaxConcurrency:        h.store.GetMaxConcurrency(),
-		GlobalRPM:             h.rateLimiter.GetRPM(),
-		TestModel:             h.store.GetTestModel(),
-		TestConcurrency:       h.store.GetTestConcurrency(),
-		ProxyURL:              h.store.GetProxyURL(),
-		PgMaxConns:            h.pgMaxConns,
-		RedisPoolSize:         h.redisPoolSize,
-		AutoCleanUnauthorized: h.store.GetAutoCleanUnauthorized(),
-		AutoCleanRateLimited:  h.store.GetAutoCleanRateLimited(),
-		AdminSecret:           adminSecretForDisplay,
-		AdminAuthSource:       adminAuthSource,
-		AutoCleanFullUsage:    h.store.GetAutoCleanFullUsage(),
-		AutoCleanError:        h.store.GetAutoCleanError(),
-		AutoCleanExpired:      h.store.GetAutoCleanExpired(),
-		ProxyPoolEnabled:      h.store.GetProxyPoolEnabled(),
-		FastSchedulerEnabled:  h.store.FastSchedulerEnabled(),
-		MaxRetries:            h.store.GetMaxRetries(),
-		AllowRemoteMigration:  h.store.GetAllowRemoteMigration() && adminAuthSource != "disabled",
-		DatabaseDriver:        h.databaseDriver,
-		DatabaseLabel:         h.databaseLabel,
-		CacheDriver:           h.cacheDriver,
-		CacheLabel:            h.cacheLabel,
-		ExpiredCleaned:        expiredCleaned,
+		MaxConcurrency:         h.store.GetMaxConcurrency(),
+		GlobalRPM:              h.rateLimiter.GetRPM(),
+		TestModel:              h.store.GetTestModel(),
+		TestConcurrency:        h.store.GetTestConcurrency(),
+		ProxyURL:               h.store.GetProxyURL(),
+		PgMaxConns:             h.pgMaxConns,
+		RedisPoolSize:          h.redisPoolSize,
+		AutoCleanUnauthorized:  h.store.GetAutoCleanUnauthorized(),
+		AutoCleanRateLimited:   h.store.GetAutoCleanRateLimited(),
+		AdminSecret:            adminSecretForDisplay,
+		AdminAuthSource:        adminAuthSource,
+		AutoCleanFullUsage:     h.store.GetAutoCleanFullUsage(),
+		AutoCleanFullUsageMode: h.store.GetAutoCleanFullUsageMode(),
+		AutoCleanError:         h.store.GetAutoCleanError(),
+		AutoCleanExpired:       h.store.GetAutoCleanExpired(),
+		ProxyPoolEnabled:       h.store.GetProxyPoolEnabled(),
+		FastSchedulerEnabled:   h.store.FastSchedulerEnabled(),
+		MaxRetries:             h.store.GetMaxRetries(),
+		AllowRemoteMigration:   h.store.GetAllowRemoteMigration() && adminAuthSource != "disabled",
+		DatabaseDriver:         h.databaseDriver,
+		DatabaseLabel:          h.databaseLabel,
+		CacheDriver:            h.cacheDriver,
+		CacheLabel:             h.cacheLabel,
+		ExpiredCleaned:         expiredCleaned,
 	})
 }
 
