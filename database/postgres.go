@@ -1370,7 +1370,7 @@ func (db *DB) GetAccountRequestCounts(ctx context.Context) (map[int64]*AccountRe
 // ListActive 获取所有状态为 active 的账号
 func (db *DB) ListActive(ctx context.Context) ([]*AccountRow, error) {
 	query := `
-		SELECT id, name, platform, type, credentials, proxy_url, status, cooldown_reason, cooldown_until, error_message, created_at, updated_at
+		SELECT id, name, platform, type, credentials, proxy_url, status, cooldown_reason, cooldown_until, COALESCE(error_message, '') AS error_message, created_at, updated_at
 		FROM accounts
 		WHERE status = 'active'
 		ORDER BY id
@@ -1425,7 +1425,7 @@ func (db *DB) ListActive(ctx context.Context) ([]*AccountRow, error) {
 // ListAll 获取全部账号（包含 error 状态）
 func (db *DB) ListAll(ctx context.Context) ([]*AccountRow, error) {
 	query := `
-		SELECT id, name, platform, type, credentials, proxy_url, status, cooldown_reason, cooldown_until, error_message, created_at, updated_at
+		SELECT id, name, platform, type, credentials, proxy_url, status, cooldown_reason, cooldown_until, COALESCE(error_message, '') AS error_message, created_at, updated_at
 		FROM accounts
 		ORDER BY id
 	`
