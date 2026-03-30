@@ -273,6 +273,8 @@
     "cleanErrorFailed": "清理错误账号失败：{{error}}",
     "healthSummary": "{{health}} · 分 {{score}} · 并发 {{concurrency}}",
     "waitingModeDetail": "等待模式（{{reason}}） · 剩余 {{left}}",
+    "waitProbeAt": "测活时间：{{time}}（{{left}}后）",
+    "waitExitAt": "退出时间：{{time}}",
     "waitUnitDay": "天",
     "waitUnitHour": "小时",
     "waitUnitMinute": "分",

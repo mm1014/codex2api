@@ -88,7 +88,7 @@ func (h *Handler) TestConnection(c *gin.Context) {
 		case http.StatusUnauthorized:
 			h.store.MarkCooldown(account, 24*time.Hour, "unauthorized")
 		case http.StatusTooManyRequests:
-			h.store.MarkCooldown(account, 5*time.Minute, "rate_limited")
+			h.store.MarkCooldown(account, auth.RateLimitedProbeInterval, "rate_limited")
 		}
 		errBody, _ := io.ReadAll(resp.Body)
 		sendTestEvent(c, testEvent{Type: "error", Error: fmt.Sprintf("上游返回 %d: %s", resp.StatusCode, truncate(string(errBody), 500))})
@@ -112,7 +112,9 @@ func (h *Handler) TestConnection(c *gin.Context) {
 				sendTestEvent(c, testEvent{Type: "content", Text: delta})
 			}
 		case "response.completed":
-			h.store.ClearCooldown(account)
+			if cooldownUntil, cooldownReason, active := account.GetCooldownSnapshot(); !(active && cooldownReason == "full_usage" && time.Now().Before(cooldownUntil)) {
+				h.store.ClearCooldown(account)
+			}
 			duration := time.Since(start).Milliseconds()
 			sendTestEvent(c, testEvent{
 				Type: "content",
@@ -231,7 +233,9 @@ func (h *Handler) BatchTest(c *gin.Context) {
 				if usagePct, ok := proxy.ParseCodexUsageHeaders(resp, acc); ok {
 					h.store.PersistUsageSnapshot(acc, usagePct)
 				}
-				h.store.ClearCooldown(acc)
+				if cooldownUntil, cooldownReason, active := acc.GetCooldownSnapshot(); !(active && cooldownReason == "full_usage" && time.Now().Before(cooldownUntil)) {
+					h.store.ClearCooldown(acc)
+				}
 				atomic.AddInt64(&successCount, 1)
 			case http.StatusUnauthorized:
 				if usagePct, ok := proxy.ParseCodexUsageHeaders(resp, acc); ok {
@@ -243,7 +247,7 @@ func (h *Handler) BatchTest(c *gin.Context) {
 				if usagePct, ok := proxy.ParseCodexUsageHeaders(resp, acc); ok {
 					h.store.PersistUsageSnapshot(acc, usagePct)
 				}
-				h.store.MarkCooldown(acc, 5*time.Minute, "rate_limited")
+				h.store.MarkCooldown(acc, auth.RateLimitedProbeInterval, "rate_limited")
 				atomic.AddInt64(&rateLimitCount, 1)
 			default:
 				atomic.AddInt64(&failedCount, 1)

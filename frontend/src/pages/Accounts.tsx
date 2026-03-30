@@ -47,6 +47,22 @@ function formatWaitRemaining(seconds: number, t: TFunction): string {
   return parts.join(' ')
 }
 
+function formatWaitPoint(dateStr?: string): string {
+  if (!dateStr) return '--'
+  const date = new Date(dateStr)
+  if (Number.isNaN(date.getTime())) return '--'
+  const fmt = new Intl.DateTimeFormat('sv-SE', {
+    timeZone: 'Asia/Shanghai',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
+  // 输出示例: 04-06 20:33
+  return fmt.format(date)
+}
+
 export default function Accounts() {
   const { t } = useTranslation()
   const [showAdd, setShowAdd] = useState(false)
@@ -850,6 +866,16 @@ export default function Accounts() {
                         }
                         return Math.max(0, Math.floor(account.wait_remaining_seconds ?? 0))
                       })()
+                      const waitProbeAt = account.wait_probe_at || account.wait_until
+                      const waitProbeRemainingSeconds = (() => {
+                        if (waitProbeAt) {
+                          const probeMs = new Date(waitProbeAt).getTime()
+                          if (!Number.isNaN(probeMs)) {
+                            return Math.max(0, Math.floor((probeMs - nowMs) / 1000))
+                          }
+                        }
+                        return Math.max(0, Math.floor(account.wait_probe_remaining_seconds ?? 0))
+                      })()
 
                       return (
                         <TableRow key={account.id} className={selected.has(account.id) ? 'bg-primary/5' : ''}>
@@ -886,11 +912,24 @@ export default function Accounts() {
                               })}
                             </div>
                             {account.wait_mode ? (
-                              <div className="text-[11px] text-amber-700">
-                                {t('accounts.waitingModeDetail', {
-                                  reason: t(`status.${waitReasonKey}`, { defaultValue: waitReasonKey }),
-                                  left: formatWaitRemaining(waitRemainingSeconds, t),
-                                })}
+                              <div className="space-y-0.5 text-[11px] text-amber-700">
+                                <div>
+                                  {t('accounts.waitingModeDetail', {
+                                    reason: t(`status.${waitReasonKey}`, { defaultValue: waitReasonKey }),
+                                    left: formatWaitRemaining(waitRemainingSeconds, t),
+                                  })}
+                                </div>
+                                <div>
+                                  {t('accounts.waitProbeAt', {
+                                    time: formatWaitPoint(waitProbeAt),
+                                    left: formatWaitRemaining(waitProbeRemainingSeconds, t),
+                                  })}
+                                </div>
+                                <div>
+                                  {t('accounts.waitExitAt', {
+                                    time: formatWaitPoint(account.wait_until),
+                                  })}
+                                </div>
                               </div>
                             ) : null}
                           </div>

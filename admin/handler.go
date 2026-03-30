@@ -233,6 +233,8 @@ type accountResponse struct {
 	WaitReason         string                     `json:"wait_reason,omitempty"`
 	WaitUntil          string                     `json:"wait_until,omitempty"`
 	WaitRemainingSec   int64                      `json:"wait_remaining_seconds,omitempty"`
+	WaitProbeAt        string                     `json:"wait_probe_at,omitempty"`
+	WaitProbeRemaining int64                      `json:"wait_probe_remaining_seconds,omitempty"`
 	ATOnly             bool                       `json:"at_only"`
 	HealthTier         string                     `json:"health_tier"`
 	SchedulerScore     float64                    `json:"scheduler_score"`
@@ -352,7 +354,7 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 			}
 			// 使用运行时状态（优先于 DB 状态）
 			resp.Status = acc.RuntimeStatus()
-			if cooldownUntil, cooldownReason, activeCooldown := acc.GetCooldownSnapshot(); activeCooldown && resp.Status != "unauthorized" {
+			if cooldownUntil, cooldownReason, activeCooldown := acc.GetCooldownSnapshot(); resp.Status != "unauthorized" && (activeCooldown || cooldownReason == "rate_limited") {
 				resp.WaitMode = true
 				reason := strings.TrimSpace(cooldownReason)
 				if reason == "" {
@@ -362,9 +364,45 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 					reason = "cooldown"
 				}
 				resp.WaitReason = reason
-				resp.WaitUntil = cooldownUntil.Format(time.RFC3339)
-				if cooldownUntil.After(now) {
-					resp.WaitRemainingSec = int64(cooldownUntil.Sub(now).Seconds())
+				waitUntil := cooldownUntil
+				if reason == "rate_limited" && !waitUntil.After(now) {
+					// rate_limited 冷却过期但尚未测活成功时，退出时间视为“当前待测活”
+					waitUntil = now
+				}
+				resp.WaitUntil = waitUntil.Format(time.RFC3339)
+				if waitUntil.After(now) {
+					resp.WaitRemainingSec = int64(waitUntil.Sub(now).Seconds())
+				}
+
+				rateProbeAt, fullUsageProbeAt := acc.GetProbeTimestamps()
+				var nextProbeAt time.Time
+				switch reason {
+				case "rate_limited":
+					// 限流等待：测活时间与等待退出时间保持一致（2 小时窗口）
+					nextProbeAt = waitUntil
+				case "full_usage":
+					if !fullUsageProbeAt.IsZero() {
+						nextProbeAt = fullUsageProbeAt.Add(auth.FullUsageProbeInterval)
+					} else {
+						nextProbeAt = now.Add(auth.FullUsageProbeInterval)
+					}
+					// 满额度等待不应晚于退出时间
+					if !cooldownUntil.IsZero() && nextProbeAt.After(cooldownUntil) {
+						nextProbeAt = cooldownUntil
+					}
+				default:
+					if !rateProbeAt.IsZero() {
+						nextProbeAt = rateProbeAt.Add(auth.RateLimitedProbeInterval)
+					}
+					if nextProbeAt.IsZero() {
+						nextProbeAt = cooldownUntil
+					}
+				}
+				if !nextProbeAt.IsZero() {
+					resp.WaitProbeAt = nextProbeAt.Format(time.RFC3339)
+					if nextProbeAt.After(now) {
+						resp.WaitProbeRemaining = int64(nextProbeAt.Sub(now).Seconds())
+					}
 				}
 			}
 		} else if row.CooldownUntil.Valid && row.CooldownUntil.Time.After(now) && row.CooldownReason != "unauthorized" {
@@ -377,6 +415,8 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 			resp.WaitReason = reason
 			resp.WaitUntil = row.CooldownUntil.Time.Format(time.RFC3339)
 			resp.WaitRemainingSec = int64(row.CooldownUntil.Time.Sub(now).Seconds())
+			resp.WaitProbeAt = row.CooldownUntil.Time.Format(time.RFC3339)
+			resp.WaitProbeRemaining = resp.WaitRemainingSec
 			if resp.Status == "active" || resp.Status == "ready" {
 				resp.Status = reason
 			}

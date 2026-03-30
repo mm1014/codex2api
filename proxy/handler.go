@@ -1254,8 +1254,8 @@ func parseRetryAfter(body []byte) time.Duration {
 func (h *Handler) applyCooldown(account *auth.Account, statusCode int, body []byte, resp *http.Response) {
 	switch statusCode {
 	case http.StatusTooManyRequests:
-		cooldown := h.compute429Cooldown(account, body, resp)
-		log.Printf("账号 %d 被限速 (plan=%s)，冷却 %v", account.ID(), account.GetPlanType(), cooldown)
+		cooldown := auth.RateLimitedProbeInterval
+		log.Printf("账号 %d 被限速 (plan=%s)，进入等待模式 %v（2小时测活一次）", account.ID(), account.GetPlanType(), cooldown)
 		h.store.MarkCooldown(account, cooldown, "rate_limited")
 	case http.StatusUnauthorized:
 		// 原子标志瞬间置位，阻止其他并发请求再选到该账号

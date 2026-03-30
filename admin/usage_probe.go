@@ -41,6 +41,10 @@ func (h *Handler) ProbeUsageSnapshot(ctx context.Context, account *auth.Account)
 	switch resp.StatusCode {
 	case http.StatusOK:
 		h.store.ReportRequestSuccess(account, 0)
+		if cooldownUntil, cooldownReason, active := account.GetCooldownSnapshot(); active && cooldownReason == "full_usage" && time.Now().Before(cooldownUntil) {
+			// 满额度等待模式下，探针成功也不提前放出，等待到额度恢复时间再自动退出
+			return nil
+		}
 		h.store.ClearCooldown(account)
 		return nil
 	case http.StatusUnauthorized:
@@ -49,7 +53,7 @@ func (h *Handler) ProbeUsageSnapshot(ctx context.Context, account *auth.Account)
 		return nil
 	case http.StatusTooManyRequests:
 		h.store.ReportRequestFailure(account, "client", 0)
-		h.store.MarkCooldown(account, 5*time.Minute, "rate_limited")
+		h.store.ExtendRateLimitedCooldown(account, auth.RateLimitedProbeInterval)
 		return nil
 	default:
 		if resp.StatusCode >= 500 {

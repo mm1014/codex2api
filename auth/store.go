@@ -26,7 +26,9 @@ const (
 	StatusError                         // 不可用（RT 失效等）
 )
 
-const rateLimitedProbeInterval = 4 * time.Hour
+const RateLimitedProbeInterval = 2 * time.Hour
+const FullUsageProbeInterval = 4 * time.Hour
+const rateLimitedWaitStep = 2 * time.Hour
 const fullUsageWaitFallback = 12 * time.Hour
 
 const (
@@ -99,6 +101,7 @@ type Account struct {
 	LastServerErrorAt       time.Time
 	LastRecoveryProbeAt     time.Time
 	LastRateLimitedProbeAt  time.Time
+	LastFullUsageProbeAt    time.Time
 
 	// 滑动窗口成功率（最近 N 次请求）
 	RecentResults    [20]uint8 // 1=成功, 0=失败
@@ -401,11 +404,15 @@ func (a *Account) IsAvailable() bool {
 	if a.healthTierLocked() == HealthTierBanned {
 		return false
 	}
-	if a.Status == StatusCooldown && time.Now().Before(a.CooldownUtil) {
-		return false
-	}
-	// 冷却期过了自动恢复
-	if a.Status == StatusCooldown && !time.Now().Before(a.CooldownUtil) {
+	if a.Status == StatusCooldown {
+		// rate_limited 必须等待测活成功后才放出，避免仅靠时间到点自动回池
+		if a.CooldownReason == "rate_limited" {
+			return false
+		}
+		if time.Now().Before(a.CooldownUtil) {
+			return false
+		}
+		// 非 rate_limited 冷却过期后自动恢复
 		return a.AccessToken != ""
 	}
 	return a.AccessToken != ""
@@ -473,6 +480,13 @@ func (a *Account) GetCooldownSnapshot() (time.Time, string, bool) {
 	return a.CooldownUtil, a.CooldownReason, active
 }
 
+// GetProbeTimestamps 获取最近的等待态测活时间戳
+func (a *Account) GetProbeTimestamps() (rateLimitedAt time.Time, fullUsageAt time.Time) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.LastRateLimitedProbeAt, a.LastFullUsageProbeAt
+}
+
 // IsBanned 检查账号是否处于强隔离状态
 func (a *Account) IsBanned() bool {
 	a.mu.RLock()
@@ -491,6 +505,9 @@ func (a *Account) RuntimeStatus() string {
 	case StatusError:
 		return "error"
 	case StatusCooldown:
+		if a.CooldownReason == "rate_limited" {
+			return "rate_limited"
+		}
 		if time.Now().Before(a.CooldownUtil) {
 			if a.CooldownReason != "" {
 				return a.CooldownReason
@@ -623,7 +640,16 @@ func (a *Account) NeedsUsageProbe(maxAge time.Duration) bool {
 	}
 	if a.Status == StatusCooldown && a.CooldownReason == "rate_limited" {
 		if time.Now().Before(a.CooldownUtil) {
-			if !a.LastRateLimitedProbeAt.IsZero() && time.Since(a.LastRateLimitedProbeAt) < rateLimitedProbeInterval {
+			if !a.LastRateLimitedProbeAt.IsZero() && time.Since(a.LastRateLimitedProbeAt) < RateLimitedProbeInterval {
+				return false
+			}
+			return true
+		}
+		return true
+	}
+	if a.Status == StatusCooldown && a.CooldownReason == "full_usage" {
+		if time.Now().Before(a.CooldownUtil) {
+			if !a.LastFullUsageProbeAt.IsZero() && time.Since(a.LastFullUsageProbeAt) < FullUsageProbeInterval {
 				return false
 			}
 			return true
@@ -644,8 +670,13 @@ func (a *Account) TryBeginUsageProbe() bool {
 		return false
 	}
 	a.usageProbeInFlight = true
-	if a.Status == StatusCooldown && a.CooldownReason == "rate_limited" {
-		a.LastRateLimitedProbeAt = time.Now()
+	if a.Status == StatusCooldown {
+		switch a.CooldownReason {
+		case "rate_limited":
+			a.LastRateLimitedProbeAt = time.Now()
+		case "full_usage":
+			a.LastFullUsageProbeAt = time.Now()
+		}
 	}
 	return true
 }
@@ -1501,6 +1532,14 @@ func (s *Store) MarkCooldown(acc *Account, duration time.Duration, reason string
 		} else {
 			acc.HealthTier = HealthTierRisky
 		}
+	case "full_usage":
+		acc.LastFullUsageProbeAt = now
+		acc.LastFailureAt = now
+		acc.FailureStreak++
+		acc.SuccessStreak = 0
+		if acc.healthTierLocked() == HealthTierHealthy {
+			acc.HealthTier = HealthTierWarm
+		}
 	}
 	acc.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
 	acc.mu.Unlock()
@@ -1518,6 +1557,23 @@ func (s *Store) MarkCooldown(acc *Account, duration time.Duration, reason string
 	if err := s.db.SetCooldown(ctx, acc.DBID, reason, until); err != nil {
 		log.Printf("[账号 %d] 持久化冷却状态失败: %v", acc.DBID, err)
 	}
+}
+
+// ExtendRateLimitedCooldown 将限流等待时间在现有基础上追加（用于探针失败后延长等待）
+func (s *Store) ExtendRateLimitedCooldown(acc *Account, step time.Duration) {
+	if acc == nil {
+		return
+	}
+	if step <= 0 {
+		step = rateLimitedWaitStep
+	}
+
+	now := time.Now()
+	base := now
+	if until, reason, active := acc.GetCooldownSnapshot(); active && reason == "rate_limited" && until.After(base) {
+		base = until
+	}
+	s.MarkCooldown(acc, base.Add(step).Sub(now), "rate_limited")
 }
 
 // ClearCooldown 清除账号冷却状态，并同步清理数据库
@@ -1712,8 +1768,8 @@ func (s *Store) runAutoCleanupSweep(ctx context.Context) {
 		cleanedUnauthorized = s.CleanByRuntimeStatus(cleanupCtx, "unauthorized")
 	}
 	if s.GetAutoCleanRateLimited() {
-		// 429 自动处理改为“等待模式”：不删除账号，只延长冷却，避免继续进入调度轮询
-		waitedRateLimited = s.WaitRateLimitedAccounts(cleanupCtx, 4*time.Hour)
+		// 429 自动处理改为“等待模式”：不删除账号，统一进入 2h 等待窗并排除调度
+		waitedRateLimited = s.WaitRateLimitedAccounts(cleanupCtx, rateLimitedWaitStep)
 	}
 	if s.GetAutoCleanError() {
 		cleanedError = s.CleanByRuntimeStatus(cleanupCtx, "error")
@@ -1728,7 +1784,6 @@ func (s *Store) runAutoCleanupSweep(ctx context.Context) {
 func (s *Store) WaitRateLimitedAccounts(ctx context.Context, minWait time.Duration) int {
 	accounts := s.Accounts()
 	waited := 0
-	now := time.Now()
 
 	for _, acc := range accounts {
 		select {
@@ -1745,15 +1800,12 @@ func (s *Store) WaitRateLimitedAccounts(ctx context.Context, minWait time.Durati
 			continue
 		}
 
-		waitDuration := minWait
-		acc.mu.RLock()
-		if acc.Status == StatusCooldown && now.Before(acc.CooldownUtil) {
-			remaining := time.Until(acc.CooldownUtil)
-			if remaining > waitDuration {
-				waitDuration = remaining
-			}
+		// 已在 rate_limited 等待态中的账号不重复打标，避免巡检重置探针节奏
+		if _, reason, _ := acc.GetCooldownSnapshot(); reason == "rate_limited" {
+			continue
 		}
-		acc.mu.RUnlock()
+
+		waitDuration := minWait
 		if waitDuration < time.Minute {
 			waitDuration = time.Minute
 		}

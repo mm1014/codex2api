@@ -273,6 +273,8 @@
     "cleanErrorFailed": "Failed to clear error accounts: {{error}}",
     "healthSummary": "{{health}} · Score {{score}} · Concurrency {{concurrency}}",
     "waitingModeDetail": "Wait mode ({{reason}}) · {{left}} left",
+    "waitProbeAt": "Probe at: {{time}} (in {{left}})",
+    "waitExitAt": "Exit at: {{time}}",
     "waitUnitDay": "d",
     "waitUnitHour": "h",
     "waitUnitMinute": "m",
