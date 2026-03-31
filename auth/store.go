@@ -1672,6 +1672,20 @@ func (s *Store) ReportRequestSuccess(acc *Account, latency time.Duration) {
 	s.fastSchedulerUpdate(acc)
 }
 
+// ReportFirstTokenLatency 在收到首个 token 时提前更新延迟画像。
+// 仅更新延迟维度，不改变成功/失败统计。
+func (s *Store) ReportFirstTokenLatency(acc *Account, latency time.Duration) {
+	if acc == nil || latency <= 0 {
+		return
+	}
+
+	acc.mu.Lock()
+	acc.recordLatencyLocked(latency)
+	acc.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
+	acc.mu.Unlock()
+	s.fastSchedulerUpdate(acc)
+}
+
 // ReportRequestFailure 记录一次失败请求，用于动态调度评分
 func (s *Store) ReportRequestFailure(acc *Account, kind string, latency time.Duration) {
 	if acc == nil {

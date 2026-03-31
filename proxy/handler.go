@@ -612,6 +612,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				if !ttftRecorded && eventType == "response.output_text.delta" {
 					firstTokenMs = int(time.Since(start).Milliseconds())
 					ttftRecorded = true
+					h.store.ReportFirstTokenLatency(account, time.Duration(firstTokenMs)*time.Millisecond)
 				}
 
 				// 累计 delta 字符数
@@ -649,6 +650,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				if !ttftRecorded && eventType == "response.output_text.delta" {
 					firstTokenMs = int(time.Since(start).Milliseconds())
 					ttftRecorded = true
+					h.store.ReportFirstTokenLatency(account, time.Duration(firstTokenMs)*time.Millisecond)
 				}
 				// 累计 delta 字符数
 				if eventType == "response.output_text.delta" {
@@ -979,6 +981,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				if !ttftRecorded && strings.Contains(eventType, ".delta") {
 					firstTokenMs = int(time.Since(start).Milliseconds())
 					ttftRecorded = true
+					h.store.ReportFirstTokenLatency(account, time.Duration(firstTokenMs)*time.Millisecond)
 				}
 				// 累计 delta 字符数（文本 + function call 参数）
 				if eventType == "response.output_text.delta" || eventType == "response.function_call_arguments.delta" {
@@ -1024,6 +1027,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				if !ttftRecorded && strings.Contains(eventType, ".delta") {
 					firstTokenMs = int(time.Since(start).Milliseconds())
 					ttftRecorded = true
+					h.store.ReportFirstTokenLatency(account, time.Duration(firstTokenMs)*time.Millisecond)
 				}
 				switch eventType {
 				case "response.output_text.delta":
