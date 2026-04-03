@@ -13,9 +13,10 @@
 
 ### 2. 部署文档 ([DEPLOYMENT.md](DEPLOYMENT.md))
 - 部署模式概览
-- Docker 部署指南
+- 源码编译部署（推荐）
+- systemd 托管
 - 本地开发环境搭建
-- 生产环境配置
+- Docker（可选）
 - 升级指南
 - 备份与恢复
 

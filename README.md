@@ -13,7 +13,8 @@ Codex2API 是一个基于 **Go + Gin + React/Vite** 的 Codex 反向代理与管
 
 - [快速部署](#快速部署)
 - [完整文档](#完整文档)
-- [环境配置](#环境配置)
+- [源码升级](#源码升级)
+- [运行配置](#运行配置)
 - [对外接口](#对外接口)
 - [管理后台](#管理后台)
 - [核心能力](#核心能力)
@@ -31,26 +32,27 @@ Codex2API 是一个基于 **Go + Gin + React/Vite** 的 Codex 反向代理与管
 
 | 模式 | 文件 | 适用场景 |
 | --- | --- | --- |
-| Docker 镜像部署 | `docker-compose.yml` | **推荐**，服务器 / 测试环境，直接拉取预构建镜像 |
-| 本地源码容器构建 | `docker-compose.local.yml` | 本地改代码后做完整容器验证 |
-| SQLite 轻量部署 | `docker-compose.sqlite.yml` | 单机轻量部署，不依赖 PostgreSQL / Redis |
-| SQLite 本地源码构建 | `docker-compose.sqlite.local.yml` | 本地改代码后验证 SQLite 轻量模式 |
+| 源码编译部署 | `frontend` + `go build` + `systemd` | **推荐**，生产长期运行（Linux + PostgreSQL） |
 | 本地开发 | `go run .` + `npm run dev` | 前后端联调与调试 |
+| 本地源码容器构建（可选） | `docker-compose.local.yml` | 本地改代码后做容器验证 |
+| Docker 镜像部署（可选） | `docker-compose.yml` | 已有镜像仓库时使用 |
+| SQLite 轻量部署（可选） | `docker-compose.sqlite.yml` | 单机轻量部署，不依赖 PostgreSQL / Redis |
+| SQLite 本地源码构建（可选） | `docker-compose.sqlite.local.yml` | 本地改代码后验证 SQLite 轻量模式 |
 
 ### 部署命令速查
 
-标准镜像版：
+推荐：源码编译部署（Linux + PostgreSQL）
 
 ```bash
-git clone https://github.com/james-6-23/codex2api.git
+git clone https://github.com/Cong0707/codex2api.git
 cd codex2api
 cp .env.example .env
-docker compose pull
-docker compose up -d
-docker compose logs -f codex2api
+cd frontend && npm ci && npm run build && cd ..
+go build -o codex2api .
+./codex2api
 ```
 
-标准本地构建版：
+可选：Docker 本地源码构建版
 
 ```bash
 cp .env.example .env
@@ -58,7 +60,7 @@ docker compose -f docker-compose.local.yml up -d --build
 docker compose -f docker-compose.local.yml logs -f codex2api
 ```
 
-SQLite 镜像版：
+可选：SQLite 镜像版
 
 ```bash
 cp .env.sqlite.example .env
@@ -67,7 +69,7 @@ docker compose -f docker-compose.sqlite.yml up -d
 docker compose -f docker-compose.sqlite.yml logs -f codex2api
 ```
 
-SQLite 本地构建版：
+可选：SQLite 本地构建版
 
 ```bash
 cp .env.sqlite.example .env
@@ -77,18 +79,10 @@ docker compose -f docker-compose.sqlite.local.yml logs -f codex2api
 
 补充说明：
 
-- 标准版和 SQLite 版都读取 `.env`
-- 切换部署模式前，需要先用对应的示例文件覆盖当前 `.env`
-- 标准镜像版项目名固定为 `codex2api`，数据卷固定为 `codex2api_pgdata`、`codex2api_redisdata`
-- 标准本地构建版项目名固定为 `codex2api-local`，数据卷固定为 `codex2api-local_pgdata`、`codex2api-local_redisdata`
-- SQLite 镜像版项目名固定为 `codex2api-sqlite`，数据卷固定为 `codex2api-sqlite_sqlite-data`
-- SQLite 本地构建版项目名固定为 `codex2api-sqlite-local`，数据卷固定为 `codex2api-sqlite-local_sqlite-data-local`
-- 标准版容器名：`codex2api`
-- SQLite 镜像版容器名：`codex2api-sqlite`
-- SQLite 本地构建版容器名：`codex2api-sqlite-local`
-- SQLite 轻量版只启动 `codex2api` 单容器，数据保存在 `/data/codex2api.db`
-- `docker compose down` 默认不会删除命名卷；只有 `docker compose down -v`、`docker volume rm` 或 `docker volume prune` 才会删除持久化数据
-- 不同部署模式的数据卷彼此隔离；切换 compose 文件后看到空数据，通常是切到了另一组卷，而不是原卷被自动删除
+- 生产部署建议优先采用源码编译 + `systemd`，便于按需控制 Go/前端版本
+- 标准版和 SQLite 版都读取 `.env`，切换模式前需用对应示例文件覆盖当前 `.env`
+- 手动构建 Go 二进制前必须先执行 `frontend` 的 `npm run build`（Go 使用 `go:embed` 嵌入 `frontend/dist`）
+- Docker 路线是可选项，不作为默认部署路径
 
 启动后访问：
 
@@ -112,25 +106,28 @@ docker compose -f docker-compose.sqlite.local.yml logs -f codex2api
 
 ---
 
-## 环境配置
+## 源码升级
 
 ```bash
-git pull && docker compose pull && docker compose up -d && docker compose logs -f codex2api
+git pull
+cd frontend && npm ci && npm run build && cd ..
+go build -o codex2api .
+sudo systemctl daemon-reload
+sudo systemctl restart codex2api
+sudo systemctl status codex2api --no-pager
 ```
 
-> **⚠️ 重要：升级前请先备份数据库！**
+> **⚠️ 重要：升级前请先备份 PostgreSQL！**
 >
 > ```bash
-> docker exec codex2api-postgres pg_dump -U codex2api codex2api > backup_$(date +%Y%m%d_%H%M%S).sql
+> pg_dump -h 127.0.0.1 -U codex2api -d codex2api > backup_$(date +%Y%m%d_%H%M%S).sql
 > ```
 >
 > 如果升级后数据异常，可通过以下命令恢复：
 >
 > ```bash
-> docker exec -i codex2api-postgres psql -U codex2api codex2api < backup_xxx.sql
+> psql -h 127.0.0.1 -U codex2api -d codex2api < backup_xxx.sql
 > ```
-
-如非必要，不建议在升级时执行 `docker compose down`；标准升级直接 `pull + up -d` 即可复用现有容器和命名卷。
 
 ### 本地开发模式
 
@@ -154,7 +151,7 @@ Vite 会自动代理 `/api` 和 `/health` 到后端，开发时访问 `http://lo
 
 ---
 
-## 环境配置
+## 运行配置
 
 ### `.env` 环境变量
 
@@ -325,7 +322,7 @@ codex2api/
 
 ## 常见注意事项
 
-- `docker-compose.yml` 拉取 GHCR 镜像用于部署；`docker-compose.local.yml` 用 `build: .` 做本地构建
+- 默认部署路径是源码编译；Docker 仅作为可选方案
 - 前端基路径固定为 `/admin/`，本地开发和生产部署一致
 - 本地手动构建 Go 二进制前需先执行 `frontend/` 的 `npm run build`
 - `.env` 只负责端口、数据库、Redis 等物理层配置；业务参数在管理台数据库里维护

@@ -19,7 +19,8 @@
 
 - Go 1.21 或更高版本
 - Node.js 18 或更高版本
-- Docker 和 Docker Compose
+- PostgreSQL 14+（推荐）
+- Docker 和 Docker Compose（可选）
 - Git
 
 ### 本地开发环境搭建
@@ -27,9 +28,8 @@
 1. **Fork 并克隆仓库**
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/codex2api.git
+git clone https://github.com/Cong0707/codex2api.git
 cd codex2api
-git remote add upstream https://github.com/james-6-23/codex2api.git
 ```
 
 2. **安装后端依赖**
@@ -63,10 +63,10 @@ cd frontend && npm run build && cd ..
 6. **启动服务**
 
 ```bash
-# 方式1: 本地运行
+# 方式1: 本地运行（推荐）
 go run .
 
-# 方式2: Docker 模式
+# 方式2: Docker 模式（可选）
 docker compose -f docker-compose.local.yml up -d --build
 ```
 
@@ -206,7 +206,7 @@ Fixes #123
 ```bash
 # 从 main 分支创建特性分支
 git checkout main
-git pull upstream main
+git pull origin main
 git checkout -b feature/your-feature-name
 ```
 
@@ -395,8 +395,8 @@ git push origin v1.0.0
 
 ## 获取帮助
 
-- **GitHub Issues**: [提交问题](https://github.com/james-6-23/codex2api/issues)
-- **Discussions**: [参与讨论](https://github.com/james-6-23/codex2api/discussions)
+- **GitHub Issues**: [提交问题](https://github.com/Cong0707/codex2api/issues)
+- **Discussions**: [参与讨论](https://github.com/Cong0707/codex2api/discussions)
 
 ---
 

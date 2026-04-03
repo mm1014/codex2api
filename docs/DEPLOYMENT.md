@@ -1,14 +1,14 @@
 # Codex2API 部署文档
 
-本文档详细说明 Codex2API 的各种部署方式。
+本文档以 **源码编译部署（Linux + PostgreSQL）** 为默认方案，Docker 仅作为可选补充。
 
 ## 目录
 
 - [部署模式概览](#部署模式概览)
-- [快速开始](#快速开始)
-- [Docker 部署](#docker-部署)
+- [源码编译部署（推荐）](#源码编译部署推荐)
+- [systemd 托管](#systemd-托管)
 - [本地开发](#本地开发)
-- [生产环境配置](#生产环境配置)
+- [Docker（可选）](#docker可选)
 - [升级指南](#升级指南)
 - [备份与恢复](#备份与恢复)
 
@@ -18,401 +18,182 @@
 
 | 模式 | 适用场景 | 数据库 | 缓存 |
 |------|----------|--------|------|
-| **标准 Docker** | 生产环境推荐 | PostgreSQL | Redis |
-| **SQLite 轻量** | 单机/测试环境 | SQLite | 内存 |
-| **本地源码** | 开发调试 | 可选 | 可选 |
+| **源码编译（推荐）** | 生产长期运行 | PostgreSQL | Memory / Redis |
+| 本地开发 | 功能开发、联调 | PostgreSQL / SQLite | Memory / Redis |
+| Docker（可选） | 容器化验证或现有容器环境 | PostgreSQL / SQLite | Redis / Memory |
 
 ---
 
-## 快速开始
+## 源码编译部署（推荐）
 
-### 1. 标准模式（推荐）
+### 1. 环境要求
+
+- Linux（Ubuntu 22.04+ 推荐）
+- Go 1.21+
+- Node.js 18+
+- PostgreSQL 14+
+
+### 2. 拉取代码
 
 ```bash
-# 克隆仓库
-git clone https://github.com/james-6-23/codex2api.git
+git clone https://github.com/Cong0707/codex2api.git
 cd codex2api
-
-# 配置环境
-cp .env.example .env
-# 编辑 .env 文件，配置必要参数
-
-# 启动服务
-docker compose pull
-docker compose up -d
-
-# 查看日志
-docker compose logs -f codex2api
 ```
 
-### 2. SQLite 轻量模式
+### 3. 初始化 PostgreSQL
 
 ```bash
-cp .env.sqlite.example .env
-docker compose -f docker-compose.sqlite.yml pull
-docker compose -f docker-compose.sqlite.yml up -d
+sudo -u postgres psql <<'SQL'
+CREATE USER codex2api WITH PASSWORD 'your_db_password';
+CREATE DATABASE codex2api OWNER codex2api;
+GRANT ALL PRIVILEGES ON DATABASE codex2api TO codex2api;
+SQL
 ```
+
+### 4. 配置 `.env`
+
+```bash
+cp .env.example .env
+```
+
+最小示例（按你的环境修改）：
+
+```bash
+CODEX_PORT=7317
+ADMIN_SECRET=your_admin_secret
+
+DATABASE_DRIVER=postgres
+DATABASE_HOST=127.0.0.1
+DATABASE_PORT=5432
+DATABASE_USER=codex2api
+DATABASE_PASSWORD=your_db_password
+DATABASE_NAME=codex2api
+DATABASE_SSLMODE=disable
+
+CACHE_DRIVER=memory
+TZ=Asia/Shanghai
+```
+
+### 5. 构建前端并编译后端
+
+```bash
+cd frontend
+npm ci
+npm run build
+cd ..
+
+go build -o codex2api .
+```
+
+### 6. 启动验证
+
+```bash
+./codex2api
+```
+
+验证：
+
+- 管理台：`http://127.0.0.1:7317/admin/`
+- 健康检查：`http://127.0.0.1:7317/health`
 
 ---
 
-## Docker 部署
+## systemd 托管
 
-### 标准模式（PostgreSQL + Redis）
+创建 `/etc/systemd/system/codex2api.service`：
 
-**docker-compose.yml 服务组成:**
+```ini
+[Unit]
+Description=Codex2API
+After=network.target postgresql.service
 
-```yaml
-services:
-  codex2api:    # 主应用服务
-  postgres:     # PostgreSQL 数据库
-  redis:        # Redis 缓存
+[Service]
+Type=simple
+WorkingDirectory=/opt/codex2api
+ExecStart=/opt/codex2api/codex2api
+EnvironmentFile=/opt/codex2api/.env
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
 ```
 
-**数据持久化:**
-
-| 卷名 | 用途 |
-|------|------|
-| codex2api_pgdata | PostgreSQL 数据 |
-| codex2api_redisdata | Redis 数据 |
-
-**完整部署流程:**
+启动与查看：
 
 ```bash
-# 1. 准备环境文件
-cp .env.example .env
-
-# 2. 修改 .env 配置
-# - CODEX_PORT: 服务端口
-# - ADMIN_SECRET: 管理后台密码
-# - DATABASE_*: 数据库配置
-# - REDIS_*: Redis 配置
-
-# 3. 启动服务
-docker compose pull
-docker compose up -d
-
-# 4. 验证状态
-docker compose ps
-docker compose logs -f codex2api
-
-# 5. 访问服务
-# 管理后台: http://localhost:8080/admin/
-# API 地址: http://localhost:8080/v1/
+sudo systemctl daemon-reload
+sudo systemctl enable --now codex2api
+sudo systemctl status codex2api --no-pager
+sudo journalctl -u codex2api -f
 ```
-
-### SQLite 轻量模式
-
-**docker-compose.sqlite.yml 服务组成:**
-
-```yaml
-services:
-  codex2api:    # 主应用服务（单容器）
-```
-
-**数据持久化:**
-
-| 卷名 | 用途 |
-|------|------|
-| codex2api-sqlite_sqlite-data | SQLite 数据库文件 |
-
-**部署流程:**
-
-```bash
-# 1. 准备环境文件
-cp .env.sqlite.example .env
-
-# 2. 修改 .env 配置
-# - CODEX_PORT: 服务端口
-# - DATABASE_PATH: /data/codex2api.db
-
-# 3. 启动服务
-docker compose -f docker-compose.sqlite.yml pull
-docker compose -f docker-compose.sqlite.yml up -d
-```
-
-### 本地源码构建模式
-
-用于本地修改代码后验证:
-
-```bash
-# 标准模式本地构建
-docker compose -f docker-compose.local.yml up -d --build
-
-# SQLite 模式本地构建
-docker compose -f docker-compose.sqlite.local.yml up -d --build
-```
-
-**注意:** 本地构建模式使用 `build: .` 而非预构建镜像。
 
 ---
 
 ## 本地开发
 
-### 环境要求
-
-- Go 1.21+
-- Node.js 18+
-- PostgreSQL 14+ (可选，可用 SQLite)
-- Redis 7+ (可选，可用内存缓存)
-
-### 后端开发
+### 后端
 
 ```bash
-# 1. 安装依赖
-go mod download
-
-# 2. 配置环境
 cp .env.example .env
-# 编辑 .env 配置本地数据库
-
-# 3. 构建前端（必须，因为 Go 使用 go:embed 嵌入）
 cd frontend && npm ci && npm run build && cd ..
-
-# 4. 启动后端
 go run .
 ```
 
-### 前端开发
+### 前端联调
 
 ```bash
 cd frontend
-
-# 安装依赖
 npm ci
-
-# 启动开发服务器
 npm run dev
 ```
 
-Vite 配置已包含代理规则，开发时访问 `http://localhost:5173/admin/`，API 请求会自动代理到后端。
-
-**vite.config.js 代理配置:**
-
-```javascript
-server: {
-  proxy: {
-    '/api': 'http://localhost:8080',
-    '/health': 'http://localhost:8080',
-    '/v1': 'http://localhost:8080',
-  }
-}
-```
+访问：`http://127.0.0.1:5173/admin/`
 
 ---
 
-## 生产环境配置
+## Docker（可选）
 
-### 1. 环境变量配置
+Docker 不是默认推荐路径，仅在你明确需要容器化时使用。
 
-**必需配置:**
-
-```bash
-# 服务端口
-CODEX_PORT=8080
-
-# 管理后台密码（强密码推荐）
-ADMIN_SECRET=your-strong-password-here
-
-# 数据库配置（PostgreSQL 模式）
-DATABASE_DRIVER=postgres
-DATABASE_HOST=postgres
-DATABASE_PORT=5432
-DATABASE_USER=codex2api
-DATABASE_PASSWORD=your-db-password
-DATABASE_NAME=codex2api
-
-# Redis 配置
-CACHE_DRIVER=redis
-REDIS_ADDR=redis:6379
-REDIS_PASSWORD=your-redis-password
-REDIS_DB=0
-
-# 时区
-TZ=Asia/Shanghai
-```
-
-**可选配置:**
+### 本地源码容器构建（推荐于 Docker 路线）
 
 ```bash
-# 快速调度器
-FAST_SCHEDULER_ENABLED=true
+cp .env.example .env
+docker compose -f docker-compose.local.yml up -d --build
+docker compose -f docker-compose.local.yml logs -f codex2api
 ```
 
-### 2. 系统设置（通过管理后台）
+### SQLite 容器构建
 
-首次启动后访问 `/admin/settings` 配置:
-
-| 参数 | 建议值 | 说明 |
-|------|--------|------|
-| Max Concurrency | 2-4 | 单账号最大并发 |
-| Global RPM | 0 或 1000+ | 0 表示不限流 |
-| Test Model | gpt-5.4 | 测试连接用模型 |
-| Test Concurrency | 50 | 批量测试并发数 |
-| PgMax Conns | 50 | PostgreSQL 连接池 |
-| Redis Pool Size | 30 | Redis 连接池 |
-
-### 3. 反向代理配置
-
-**Nginx 配置示例:**
-
-```nginx
-server {
-    listen 80;
-    server_name codex.example.com;
-
-    # 强制 HTTPS（生产环境推荐）
-    return 301 https://$server_name$request_uri;
-}
-
-server {
-    listen 443 ssl http2;
-    server_name codex.example.com;
-
-    ssl_certificate /path/to/cert.pem;
-    ssl_certificate_key /path/to/key.pem;
-
-    # 管理后台（可添加额外认证）
-    location /admin/ {
-        proxy_pass http://localhost:8080;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-
-    # API 端点
-    location /v1/ {
-        proxy_pass http://localhost:8080;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-
-        # 流式响应优化
-        proxy_buffering off;
-        proxy_cache off;
-    }
-
-    # 健康检查
-    location /health {
-        proxy_pass http://localhost:8080;
-    }
-}
+```bash
+cp .env.sqlite.example .env
+docker compose -f docker-compose.sqlite.local.yml up -d --build
 ```
 
-### 4. Docker Compose 生产配置
-
-```yaml
-version: '3.8'
-
-services:
-  codex2api:
-    image: ghcr.io/james-6-23/codex2api:latest
-    container_name: codex2api
-    restart: unless-stopped
-    env_file:
-      - .env
-    ports:
-      - "127.0.0.1:8080:8080"  # 仅本地监听，通过 nginx 暴露
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    networks:
-      - codex2api
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "100m"
-        max-file: "3"
-
-  postgres:
-    image: postgres:15-alpine
-    container_name: codex2api-postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: ${DATABASE_USER}
-      POSTGRES_PASSWORD: ${DATABASE_PASSWORD}
-      POSTGRES_DB: ${DATABASE_NAME}
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    networks:
-      - codex2api
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USER} -d ${DATABASE_NAME}"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  redis:
-    image: redis:7-alpine
-    container_name: codex2api-redis
-    restart: unless-stopped
-    command: redis-server --requirepass ${REDIS_PASSWORD}
-    volumes:
-      - redisdata:/data
-    networks:
-      - codex2api
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-volumes:
-  pgdata:
-  redisdata:
-
-networks:
-  codex2api:
-    driver: bridge
-```
+如果你要使用镜像拉取模式，请改成你自己的镜像仓库地址，不要依赖历史上游镜像地址。
 
 ---
 
 ## 升级指南
 
-### 标准升级流程
+### 源码部署升级（推荐）
 
 ```bash
-# 1. 备份数据库（重要！）
-docker exec codex2api-postgres pg_dump -U codex2api codex2api > backup_$(date +%Y%m%d_%H%M%S).sql
-
-# 2. 拉取新版本
 git pull
-docker compose pull
-
-# 3. 滚动更新（零停机）
-docker compose up -d
-
-# 4. 验证状态
-docker compose ps
-docker compose logs -f codex2api
-
-# 5. 健康检查
-curl http://localhost:8080/health
+cd frontend && npm ci && npm run build && cd ..
+go build -o codex2api .
+sudo systemctl daemon-reload
+sudo systemctl restart codex2api
+sudo systemctl status codex2api --no-pager
 ```
 
-### 版本降级
+### Docker 路线升级（可选）
 
 ```bash
-# 1. 停止服务
-docker compose down
-
-# 2. 恢复数据库
-docker exec -i codex2api-postgres psql -U codex2api codex2api < backup_xxx.sql
-
-# 3. 指定旧版本启动
-# 编辑 docker-compose.yml，指定 image:tag
-docker compose up -d
-```
-
-### SQLite 模式升级
-
-```bash
-# 备份 SQLite 数据库
-cp /path/to/codex2api.db /path/to/codex2api.db.backup_$(date +%Y%m%d_%H%M%S)
-
-# 升级
-docker compose -f docker-compose.sqlite.yml pull
-docker compose -f docker-compose.sqlite.yml up -d
+git pull
+docker compose -f docker-compose.local.yml up -d --build
+docker compose -f docker-compose.local.yml logs -f codex2api
 ```
 
 ---
@@ -421,82 +202,24 @@ docker compose -f docker-compose.sqlite.yml up -d
 
 ### PostgreSQL 备份
 
-**自动备份脚本:**
-
 ```bash
-#!/bin/bash
-# backup.sh
-
-BACKUP_DIR="/backup/codex2api"
-DATE=$(date +%Y%m%d_%H%M%S)
-CONTAINER="codex2api-postgres"
-DB_NAME="codex2api"
-DB_USER="codex2api"
-
-# 创建备份目录
-mkdir -p $BACKUP_DIR
-
-# 执行备份
-docker exec $CONTAINER pg_dump -U $DB_USER $DB_NAME > $BACKUP_DIR/codex2api_$DATE.sql
-
-# 保留最近 30 天备份
-find $BACKUP_DIR -name "*.sql" -mtime +30 -delete
-
-echo "Backup completed: $BACKUP_DIR/codex2api_$DATE.sql"
-```
-
-**添加到定时任务:**
-
-```bash
-# 每天凌晨 2 点执行备份
-0 2 * * * /path/to/backup.sh >> /var/log/codex2api-backup.log 2>&1
+pg_dump -h 127.0.0.1 -U codex2api -d codex2api > backup_$(date +%Y%m%d_%H%M%S).sql
 ```
 
 ### PostgreSQL 恢复
 
 ```bash
-# 1. 停止应用
-docker compose stop codex2api
-
-# 2. 恢复数据库
-docker exec -i codex2api-postgres psql -U codex2api -d codex2api < backup_xxx.sql
-
-# 3. 重启服务
-docker compose start codex2api
+psql -h 127.0.0.1 -U codex2api -d codex2api < backup_xxx.sql
 ```
 
 ### SQLite 备份
 
 ```bash
-# 备份
-sqlite3 /data/codex2api.db ".backup '/backup/codex2api_$(date +%Y%m%d_%H%M%S).db'"
-
-# 或简单复制
 cp /data/codex2api.db /backup/codex2api_$(date +%Y%m%d_%H%M%S).db
 ```
 
 ### SQLite 恢复
 
 ```bash
-# 停止服务
-docker compose -f docker-compose.sqlite.yml stop
-
-# 恢复数据
 cp /backup/codex2api_xxx.db /data/codex2api.db
-
-# 启动服务
-docker compose -f docker-compose.sqlite.yml start
 ```
-
----
-
-## 容器名与卷名对照
-
-| 部署模式 | 容器名 | 数据卷 |
-|----------|--------|--------|
-| 标准镜像 | codex2api | codex2api_pgdata, codex2api_redisdata |
-| 标准本地 | codex2api-local | codex2api-local_pgdata, codex2api-local_redisdata |
-| SQLite 镜像 | codex2api-sqlite | codex2api-sqlite_sqlite-data |
-| SQLite 本地 | codex2api-sqlite-local | codex2api-sqlite-local_sqlite-data-local |
-
-**注意:** 不同模式的数据卷相互隔离，切换 compose 文件后看到空数据是正常现象。
