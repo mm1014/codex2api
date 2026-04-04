@@ -33,9 +33,34 @@ func (h *Handler) RegisterCliproxyRoutes(r *gin.Engine) {
 	group.POST("/api-call", h.adminAuthMiddleware(), h.ManagementAPICallCompat)
 }
 
-// cliproxyUploadAuthMiddleware only accepts public upload keys for one-way upload.
+// cliproxyUploadAuthMiddleware:
+// 1) 兼容管理员旧链路（X-Admin-Key / X-Management-Key / Authorization Bearer）
+// 2) 兼容公开上传密钥（pk-...）
+// 其它 /public 接口仍然只接受公开密钥，不接受管理员密钥。
 func (h *Handler) cliproxyUploadAuthMiddleware() gin.HandlerFunc {
-	return h.publicAPIKeyAuthMiddleware()
+	publicKeyAuth := h.publicAPIKeyAuthMiddleware()
+	return func(c *gin.Context) {
+		adminSecret, _ := h.resolveAdminSecret(c.Request.Context())
+		if adminSecret != "" {
+			adminKey := strings.TrimSpace(c.GetHeader("X-Admin-Key"))
+			if adminKey == "" {
+				adminKey = strings.TrimSpace(c.GetHeader("X-Management-Key"))
+			}
+			if adminKey == "" {
+				authHeader := strings.TrimSpace(c.GetHeader("Authorization"))
+				if strings.HasPrefix(authHeader, "Bearer ") {
+					adminKey = strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+				}
+			}
+			adminKey = security.SanitizeInput(adminKey)
+			if adminKey != "" && security.SecureCompare(adminKey, adminSecret) {
+				c.Next()
+				return
+			}
+		}
+		// 管理员密钥未通过时，回退到公开上传密钥鉴权
+		publicKeyAuth(c)
+	}
 }
 
 // ListAuthFilesCompat returns a CLIProxyAPI-style auth files list backed by codex2api accounts.

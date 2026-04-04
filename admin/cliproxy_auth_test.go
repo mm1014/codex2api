@@ -75,6 +75,26 @@ func TestCliproxyUploadAuthAllowsOnlyConfiguredPublicKey(t *testing.T) {
 	}
 }
 
+func TestCliproxyUploadAuthAllowsAdminKeyWithoutPublicKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := newSQLiteDBForAdminTest(t)
+	h := &Handler{db: db, adminSecretEnv: "admin-secret-123456"}
+
+	r := gin.New()
+	r.POST("/v0/management/auth-files", h.cliproxyUploadAuthMiddleware(), func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/auth-files", nil)
+	req.Header.Set("X-Admin-Key", "admin-secret-123456")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want=%d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+}
+
 func TestPublicKeyCannotPassAdminMiddleware(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := newSQLiteDBForAdminTest(t)
