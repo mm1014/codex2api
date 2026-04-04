@@ -22,6 +22,8 @@ type AccountRow struct {
 	Type           string
 	Credentials    map[string]interface{}
 	ProxyURL       string
+	PublicAPIKeyID sql.NullInt64
+	SettledAmount  float64
 	Status         string
 	CooldownReason string
 	CooldownUntil  sql.NullTime
@@ -196,10 +198,12 @@ func (db *DB) migrate(ctx context.Context) error {
 
 	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS cooldown_reason VARCHAR(50) DEFAULT '';
 	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS cooldown_until TIMESTAMP NULL;
+	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS public_api_key_id BIGINT NULL;
 
 	CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts(status);
 	CREATE INDEX IF NOT EXISTS idx_accounts_platform ON accounts(platform);
 	CREATE INDEX IF NOT EXISTS idx_accounts_cooldown_until ON accounts(cooldown_until);
+	CREATE INDEX IF NOT EXISTS idx_accounts_public_api_key_id ON accounts(public_api_key_id);
 
 
 	CREATE TABLE IF NOT EXISTS usage_logs (
@@ -245,6 +249,52 @@ func (db *DB) migrate(ctx context.Context) error {
 		key        VARCHAR(255) NOT NULL UNIQUE,
 		created_at TIMESTAMP DEFAULT NOW()
 	);
+	ALTER TABLE public_api_keys ADD COLUMN IF NOT EXISTS created_ip VARCHAR(64) DEFAULT '';
+	ALTER TABLE public_api_keys ADD COLUMN IF NOT EXISTS last_used_ip VARCHAR(64) DEFAULT '';
+	ALTER TABLE public_api_keys ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMP NULL;
+	ALTER TABLE public_api_keys ADD COLUMN IF NOT EXISTS balance_usd NUMERIC(12,4) DEFAULT 0;
+	ALTER TABLE public_api_keys ADD COLUMN IF NOT EXISTS source VARCHAR(32) DEFAULT 'admin';
+	ALTER TABLE public_api_keys ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
+
+	CREATE TABLE IF NOT EXISTS public_account_settlements (
+		id                     SERIAL PRIMARY KEY,
+		account_id             BIGINT NOT NULL UNIQUE,
+		public_api_key_id      BIGINT NOT NULL,
+		baseline_usage_percent NUMERIC(7,4) NOT NULL DEFAULT 0,
+		last_usage_percent     NUMERIC(7,4) NOT NULL DEFAULT 0,
+		settled_amount_usd     NUMERIC(12,4) NOT NULL DEFAULT 0,
+		initial_amount_usd     NUMERIC(12,4) NOT NULL DEFAULT 0,
+		full_amount_usd        NUMERIC(12,4) NOT NULL DEFAULT 0,
+		finalized              BOOLEAN NOT NULL DEFAULT FALSE,
+		created_at             TIMESTAMP DEFAULT NOW(),
+		updated_at             TIMESTAMP DEFAULT NOW()
+	);
+	CREATE INDEX IF NOT EXISTS idx_public_account_settlements_key_id ON public_account_settlements(public_api_key_id);
+
+	CREATE TABLE IF NOT EXISTS public_balance_logs (
+		id                SERIAL PRIMARY KEY,
+		public_api_key_id BIGINT NOT NULL,
+		account_id        BIGINT DEFAULT 0,
+		entry_type        VARCHAR(32) NOT NULL DEFAULT '',
+		delta_usd         NUMERIC(12,4) NOT NULL DEFAULT 0,
+		balance_after_usd NUMERIC(12,4) NOT NULL DEFAULT 0,
+		note              TEXT DEFAULT '',
+		created_at        TIMESTAMP DEFAULT NOW()
+	);
+	CREATE INDEX IF NOT EXISTS idx_public_balance_logs_key_created ON public_balance_logs(public_api_key_id, created_at);
+
+	CREATE TABLE IF NOT EXISTS redeem_codes (
+		id                     SERIAL PRIMARY KEY,
+		code                   VARCHAR(255) NOT NULL UNIQUE,
+		amount_usd             NUMERIC(12,4) NOT NULL,
+		status                 VARCHAR(20) NOT NULL DEFAULT 'active',
+		deleted_at             TIMESTAMP NULL,
+		deleted_reason         VARCHAR(50) DEFAULT '',
+		deleted_by_public_key_id BIGINT DEFAULT 0,
+		created_at             TIMESTAMP DEFAULT NOW(),
+		updated_at             TIMESTAMP DEFAULT NOW()
+	);
+	CREATE INDEX IF NOT EXISTS idx_redeem_codes_status_amount ON redeem_codes(status, amount_usd);
 
 	CREATE TABLE IF NOT EXISTS system_settings (
 		id                 INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
@@ -273,6 +323,8 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS allow_remote_migration BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_clean_error BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_clean_expired BOOLEAN DEFAULT FALSE;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS public_initial_credit_usd NUMERIC(12,4) DEFAULT 0.1;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS public_full_credit_usd NUMERIC(12,4) DEFAULT 2;
 	UPDATE system_settings
 	SET auto_clean_full_usage_mode = CASE
 		WHEN COALESCE(auto_clean_full_usage, false) THEN 'delete'
@@ -381,6 +433,18 @@ func (db *DB) InsertPublicAPIKey(ctx context.Context, name, key string) (int64, 
 	)
 }
 
+// InsertPublicAPIKeyWithMeta 插入公开上传密钥（带来源/IP/余额）
+func (db *DB) InsertPublicAPIKeyWithMeta(ctx context.Context, name, key, source, createdIP string, balanceUSD float64) (int64, error) {
+	if source == "" {
+		source = "admin"
+	}
+	return db.insertRowID(ctx,
+		`INSERT INTO public_api_keys (name, key, source, created_ip, last_used_ip, balance_usd, updated_at) VALUES ($1, $2, $3, $4, $4, $5, NOW()) RETURNING id`,
+		`INSERT INTO public_api_keys (name, key, source, created_ip, last_used_ip, balance_usd, updated_at) VALUES ($1, $2, $3, $4, $4, $5, CURRENT_TIMESTAMP)`,
+		name, key, source, createdIP, balanceUSD,
+	)
+}
+
 // ==================== System Settings ====================
 
 // SystemSettings 运行时设置项
@@ -403,6 +467,8 @@ type SystemSettings struct {
 	FastSchedulerEnabled   bool
 	MaxRetries             int
 	AllowRemoteMigration   bool
+	PublicInitialCreditUSD float64
+	PublicFullCreditUSD    float64
 }
 
 func normalizeFullUsageMode(mode string) string {
@@ -428,13 +494,15 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		       COALESCE(max_retries, 2),
 		       COALESCE(allow_remote_migration, false),
 		       COALESCE(auto_clean_error, false),
-		       COALESCE(auto_clean_expired, false)
+		       COALESCE(auto_clean_expired, false),
+		       COALESCE(public_initial_credit_usd, 0.1),
+		       COALESCE(public_full_credit_usd, 2)
 		FROM system_settings WHERE id = 1
 	`).Scan(
 		&s.MaxConcurrency, &s.GlobalRPM, &s.TestModel, &s.TestConcurrency, &s.ProxyURL, &s.PgMaxConns, &s.RedisPoolSize,
 		&s.AutoCleanUnauthorized, &s.AutoCleanRateLimited, &s.AdminSecret, &s.AutoCleanFullUsage, &s.AutoCleanFullUsageMode,
 		&s.ProxyPoolEnabled, &s.FastSchedulerEnabled, &s.MaxRetries, &s.AllowRemoteMigration,
-		&s.AutoCleanError, &s.AutoCleanExpired,
+		&s.AutoCleanError, &s.AutoCleanExpired, &s.PublicInitialCreditUSD, &s.PublicFullCreditUSD,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -459,9 +527,10 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 		INSERT INTO system_settings (
 			id, max_concurrency, global_rpm, test_model, test_concurrency, proxy_url, pg_max_conns, redis_pool_size,
 			auto_clean_unauthorized, auto_clean_rate_limited, admin_secret, auto_clean_full_usage, auto_clean_full_usage_mode, proxy_pool_enabled,
-			fast_scheduler_enabled, max_retries, allow_remote_migration, auto_clean_error, auto_clean_expired
+			fast_scheduler_enabled, max_retries, allow_remote_migration, auto_clean_error, auto_clean_expired,
+			public_initial_credit_usd, public_full_credit_usd
 		)
-		VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+		VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
 		ON CONFLICT (id) DO UPDATE SET
 			max_concurrency         = EXCLUDED.max_concurrency,
 			global_rpm              = EXCLUDED.global_rpm,
@@ -480,10 +549,13 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 			max_retries             = EXCLUDED.max_retries,
 			allow_remote_migration  = EXCLUDED.allow_remote_migration,
 			auto_clean_error        = EXCLUDED.auto_clean_error,
-			auto_clean_expired      = EXCLUDED.auto_clean_expired
+			auto_clean_expired      = EXCLUDED.auto_clean_expired,
+			public_initial_credit_usd = EXCLUDED.public_initial_credit_usd,
+			public_full_credit_usd = EXCLUDED.public_full_credit_usd
 	`, s.MaxConcurrency, s.GlobalRPM, s.TestModel, s.TestConcurrency, s.ProxyURL, s.PgMaxConns, s.RedisPoolSize,
 		s.AutoCleanUnauthorized, s.AutoCleanRateLimited, s.AdminSecret, fullUsageEnabled, fullUsageMode, s.ProxyPoolEnabled,
-		s.FastSchedulerEnabled, s.MaxRetries, s.AllowRemoteMigration, s.AutoCleanError, s.AutoCleanExpired)
+		s.FastSchedulerEnabled, s.MaxRetries, s.AllowRemoteMigration, s.AutoCleanError, s.AutoCleanExpired,
+		s.PublicInitialCreditUSD, s.PublicFullCreditUSD)
 	return err
 }
 
@@ -1486,10 +1558,16 @@ func (db *DB) GetAccountRequestCounts(ctx context.Context) (map[int64]*AccountRe
 // ListActive 获取所有状态为 active 的账号
 func (db *DB) ListActive(ctx context.Context) ([]*AccountRow, error) {
 	query := `
-		SELECT id, name, platform, type, credentials, proxy_url, status, cooldown_reason, cooldown_until, COALESCE(error_message, '') AS error_message, created_at, updated_at
-		FROM accounts
-		WHERE status = 'active'
-		ORDER BY id
+		SELECT a.id, a.name, a.platform, a.type, a.credentials, a.proxy_url,
+		       a.public_api_key_id,
+		       COALESCE(s.settled_amount_usd, 0) AS settled_amount_usd,
+		       a.status, a.cooldown_reason, a.cooldown_until,
+		       COALESCE(a.error_message, '') AS error_message,
+		       a.created_at, a.updated_at
+		FROM accounts a
+		LEFT JOIN public_account_settlements s ON s.account_id = a.id
+		WHERE a.status = 'active'
+		ORDER BY a.id
 	`
 	rows, err := db.conn.QueryContext(ctx, query)
 	if err != nil {
@@ -1511,6 +1589,8 @@ func (db *DB) ListActive(ctx context.Context) ([]*AccountRow, error) {
 			&a.Type,
 			&credRaw,
 			&a.ProxyURL,
+			&a.PublicAPIKeyID,
+			&a.SettledAmount,
 			&a.Status,
 			&a.CooldownReason,
 			&cooldownUntilRaw,
@@ -1541,9 +1621,15 @@ func (db *DB) ListActive(ctx context.Context) ([]*AccountRow, error) {
 // ListAll 获取全部账号（包含 error 状态）
 func (db *DB) ListAll(ctx context.Context) ([]*AccountRow, error) {
 	query := `
-		SELECT id, name, platform, type, credentials, proxy_url, status, cooldown_reason, cooldown_until, COALESCE(error_message, '') AS error_message, created_at, updated_at
-		FROM accounts
-		ORDER BY id
+		SELECT a.id, a.name, a.platform, a.type, a.credentials, a.proxy_url,
+		       a.public_api_key_id,
+		       COALESCE(s.settled_amount_usd, 0) AS settled_amount_usd,
+		       a.status, a.cooldown_reason, a.cooldown_until,
+		       COALESCE(a.error_message, '') AS error_message,
+		       a.created_at, a.updated_at
+		FROM accounts a
+		LEFT JOIN public_account_settlements s ON s.account_id = a.id
+		ORDER BY a.id
 	`
 	rows, err := db.conn.QueryContext(ctx, query)
 	if err != nil {
@@ -1565,6 +1651,8 @@ func (db *DB) ListAll(ctx context.Context) ([]*AccountRow, error) {
 			&a.Type,
 			&credRaw,
 			&a.ProxyURL,
+			&a.PublicAPIKeyID,
+			&a.SettledAmount,
 			&a.Status,
 			&a.CooldownReason,
 			&cooldownUntilRaw,

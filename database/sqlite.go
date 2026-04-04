@@ -31,6 +31,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 			type TEXT DEFAULT 'oauth',
 			credentials TEXT NOT NULL DEFAULT '{}',
 			proxy_url TEXT DEFAULT '',
+			public_api_key_id INTEGER NULL,
 			status TEXT DEFAULT 'active',
 			cooldown_reason TEXT DEFAULT '',
 			cooldown_until TIMESTAMP NULL,
@@ -70,7 +71,47 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			name TEXT DEFAULT '',
 			key TEXT NOT NULL UNIQUE,
+			created_ip TEXT DEFAULT '',
+			last_used_ip TEXT DEFAULT '',
+			last_used_at TIMESTAMP NULL,
+			balance_usd REAL DEFAULT 0,
+			source TEXT DEFAULT 'admin',
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE TABLE IF NOT EXISTS public_account_settlements (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			account_id INTEGER NOT NULL UNIQUE,
+			public_api_key_id INTEGER NOT NULL,
+			baseline_usage_percent REAL NOT NULL DEFAULT 0,
+			last_usage_percent REAL NOT NULL DEFAULT 0,
+			settled_amount_usd REAL NOT NULL DEFAULT 0,
+			initial_amount_usd REAL NOT NULL DEFAULT 0,
+			full_amount_usd REAL NOT NULL DEFAULT 0,
+			finalized INTEGER NOT NULL DEFAULT 0,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE TABLE IF NOT EXISTS public_balance_logs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			public_api_key_id INTEGER NOT NULL,
+			account_id INTEGER DEFAULT 0,
+			entry_type TEXT NOT NULL DEFAULT '',
+			delta_usd REAL NOT NULL DEFAULT 0,
+			balance_after_usd REAL NOT NULL DEFAULT 0,
+			note TEXT DEFAULT '',
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE TABLE IF NOT EXISTS redeem_codes (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			code TEXT NOT NULL UNIQUE,
+			amount_usd REAL NOT NULL,
+			status TEXT NOT NULL DEFAULT 'active',
+			deleted_at TIMESTAMP NULL,
+			deleted_reason TEXT DEFAULT '',
+			deleted_by_public_key_id INTEGER DEFAULT 0,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		);`,
 		`CREATE TABLE IF NOT EXISTS system_settings (
 			id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
@@ -91,7 +132,9 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 			proxy_pool_enabled INTEGER DEFAULT 0,
 			fast_scheduler_enabled INTEGER DEFAULT 0,
 			max_retries INTEGER DEFAULT 2,
-			allow_remote_migration INTEGER DEFAULT 0
+			allow_remote_migration INTEGER DEFAULT 0,
+			public_initial_credit_usd REAL DEFAULT 0.1,
+			public_full_credit_usd REAL DEFAULT 2
 		);`,
 		`CREATE TABLE IF NOT EXISTS proxies (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -122,8 +165,15 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		name  string
 		def   string
 	}{
+		{"accounts", "public_api_key_id", "INTEGER NULL"},
 		{"accounts", "cooldown_reason", "TEXT DEFAULT ''"},
 		{"accounts", "cooldown_until", "TIMESTAMP NULL"},
+		{"public_api_keys", "created_ip", "TEXT DEFAULT ''"},
+		{"public_api_keys", "last_used_ip", "TEXT DEFAULT ''"},
+		{"public_api_keys", "last_used_at", "TIMESTAMP NULL"},
+		{"public_api_keys", "balance_usd", "REAL DEFAULT 0"},
+		{"public_api_keys", "source", "TEXT DEFAULT 'admin'"},
+		{"public_api_keys", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"},
 		{"usage_logs", "input_tokens", "INTEGER DEFAULT 0"},
 		{"usage_logs", "output_tokens", "INTEGER DEFAULT 0"},
 		{"usage_logs", "reasoning_tokens", "INTEGER DEFAULT 0"},
@@ -147,6 +197,8 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "fast_scheduler_enabled", "INTEGER DEFAULT 0"},
 		{"system_settings", "max_retries", "INTEGER DEFAULT 2"},
 		{"system_settings", "allow_remote_migration", "INTEGER DEFAULT 0"},
+		{"system_settings", "public_initial_credit_usd", "REAL DEFAULT 0.1"},
+		{"system_settings", "public_full_credit_usd", "REAL DEFAULT 2"},
 		{"proxies", "test_ip", "TEXT DEFAULT ''"},
 		{"proxies", "test_location", "TEXT DEFAULT ''"},
 		{"proxies", "test_latency_ms", "INTEGER DEFAULT 0"},
@@ -171,11 +223,15 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts(status);`,
 		`CREATE INDEX IF NOT EXISTS idx_accounts_platform ON accounts(platform);`,
 		`CREATE INDEX IF NOT EXISTS idx_accounts_cooldown_until ON accounts(cooldown_until);`,
+		`CREATE INDEX IF NOT EXISTS idx_accounts_public_api_key_id ON accounts(public_api_key_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_logs_created_at ON usage_logs(created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_logs_account_id ON usage_logs(account_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_logs_created_status ON usage_logs(created_at, status_code);`,
 		`CREATE INDEX IF NOT EXISTS idx_account_events_created ON account_events(created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_account_events_type_created ON account_events(event_type, created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_public_account_settlements_key_id ON public_account_settlements(public_api_key_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_public_balance_logs_key_created ON public_balance_logs(public_api_key_id, created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_redeem_codes_status_amount ON redeem_codes(status, amount_usd);`,
 	}
 	for _, stmt := range indexStatements {
 		if _, err := db.conn.ExecContext(ctx, stmt); err != nil {

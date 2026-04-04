@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/codex2api/auth"
+	"github.com/codex2api/database"
 	"github.com/codex2api/proxy"
 	"github.com/codex2api/security"
 	"github.com/gin-gonic/gin"
@@ -33,60 +34,7 @@ func (h *Handler) RegisterCliproxyRoutes(r *gin.Engine) {
 
 // cliproxyUploadAuthMiddleware only accepts public upload keys for one-way upload.
 func (h *Handler) cliproxyUploadAuthMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		extractKey := func() string {
-			candidates := []string{
-				c.GetHeader("X-Public-Key"),
-			}
-			for _, candidate := range candidates {
-				key := strings.TrimSpace(security.SanitizeInput(candidate))
-				if key != "" {
-					return key
-				}
-			}
-			authHeader := strings.TrimSpace(c.GetHeader("Authorization"))
-			if strings.HasPrefix(authHeader, "Bearer ") {
-				return strings.TrimSpace(security.SanitizeInput(strings.TrimPrefix(authHeader, "Bearer ")))
-			}
-			return ""
-		}
-
-		providedKey := extractKey()
-
-		readCtx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
-		defer cancel()
-		publicKeys, err := h.db.GetAllPublicAPIKeyValues(readCtx)
-		if err != nil {
-			writeError(c, http.StatusInternalServerError, "读取公开密钥失败")
-			c.Abort()
-			return
-		}
-
-		// 明确安全边界：未配置公开密钥时，公开上传接口直接拒绝请求。
-		if len(publicKeys) == 0 {
-			writeError(c, http.StatusForbidden, "未配置公开上传密钥")
-			c.Abort()
-			return
-		}
-
-		// 公开密钥限定为 pk- 前缀，避免与管理密钥/业务 API Key 混用。
-		if providedKey == "" || !strings.HasPrefix(providedKey, "pk-") {
-			writeError(c, http.StatusUnauthorized, "公开上传密钥无效或缺失")
-			c.Abort()
-			return
-		}
-
-		for _, key := range publicKeys {
-			if security.SecureCompare(providedKey, key) {
-				c.Next()
-				return
-			}
-		}
-
-		security.SecurityAuditLog("PUBLIC_UPLOAD_AUTH_FAILED", fmt.Sprintf("path=%s ip=%s", c.Request.URL.Path, c.ClientIP()))
-		writeError(c, http.StatusUnauthorized, "公开上传密钥无效或缺失")
-		c.Abort()
-	}
+	return h.publicAPIKeyAuthMiddleware()
 }
 
 // ListAuthFilesCompat returns a CLIProxyAPI-style auth files list backed by codex2api accounts.
@@ -166,6 +114,11 @@ func (h *Handler) ListAuthFilesCompat(c *gin.Context) {
 // UploadAuthFilesCompat accepts CLIProxyAPI-style auth JSON (multipart or raw JSON).
 func (h *Handler) UploadAuthFilesCompat(c *gin.Context) {
 	ctx := c.Request.Context()
+	var sourcePublicKeyID *int64
+	if keyAuth, ok := h.getPublicAPIKeyFromContext(c); ok && keyAuth != nil && keyAuth.ID > 0 {
+		keyID := keyAuth.ID
+		sourcePublicKeyID = &keyID
+	}
 
 	var uploaded []string
 	var failed []gin.H
@@ -193,7 +146,7 @@ func (h *Handler) UploadAuthFilesCompat(c *gin.Context) {
 				failed = append(failed, gin.H{"name": fileName, "error": errRead.Error()})
 				continue
 			}
-			names, errUpload := h.importCompatPayload(ctx, fileName, data)
+			names, errUpload := h.importCompatPayload(ctx, fileName, data, sourcePublicKeyID)
 			if errUpload != nil {
 				failed = append(failed, gin.H{"name": fileName, "error": errUpload.Error()})
 				continue
@@ -207,7 +160,7 @@ func (h *Handler) UploadAuthFilesCompat(c *gin.Context) {
 			writeError(c, http.StatusBadRequest, "读取请求体失败")
 			return
 		}
-		names, errUpload := h.importCompatPayload(ctx, name, data)
+		names, errUpload := h.importCompatPayload(ctx, name, data, sourcePublicKeyID)
 		if errUpload != nil {
 			writeError(c, http.StatusBadRequest, errUpload.Error())
 			return
@@ -488,7 +441,7 @@ func readMultipartFile(header *multipart.FileHeader) ([]byte, error) {
 	return io.ReadAll(file)
 }
 
-func (h *Handler) importCompatPayload(ctx context.Context, nameHint string, data []byte) ([]string, error) {
+func (h *Handler) importCompatPayload(ctx context.Context, nameHint string, data []byte, sourcePublicKeyID *int64) ([]string, error) {
 	entries, err := parseCompatEntries(data)
 	if err != nil {
 		return nil, err
@@ -506,7 +459,7 @@ func (h *Handler) importCompatPayload(ctx context.Context, nameHint string, data
 		}
 
 		name := buildCompatName(nameHint, parsed.email, idx, len(entries))
-		id, errInsert := h.insertCompatAccount(ctx, name, parsed)
+		id, errInsert := h.insertCompatAccount(ctx, name, parsed, sourcePublicKeyID)
 		if errInsert != nil {
 			return uploaded, errInsert
 		}
@@ -585,7 +538,7 @@ func parseCompatEntry(entry map[string]interface{}) compatEntry {
 	return parsed
 }
 
-func (h *Handler) insertCompatAccount(ctx context.Context, name string, entry compatEntry) (int64, error) {
+func (h *Handler) insertCompatAccount(ctx context.Context, name string, entry compatEntry, sourcePublicKeyID *int64) (int64, error) {
 	if entry.refreshToken == "" && entry.accessToken == "" {
 		return 0, errors.New("缺少 refresh_token 或 access_token")
 	}
@@ -634,6 +587,25 @@ func (h *Handler) insertCompatAccount(ctx context.Context, name string, entry co
 		_ = h.db.UpdateCredentials(ctx, id, creds)
 	}
 
+	if sourcePublicKeyID != nil && *sourcePublicKeyID > 0 {
+		initialCredit := 0.1
+		fullCredit := 2.0
+		if h.store != nil {
+			initialCredit = h.store.GetPublicInitialCreditUSD()
+			fullCredit = h.store.GetPublicFullCreditUSD()
+		}
+		if err := h.db.BindAccountToPublicKey(ctx, database.PublicSettlementBindInput{
+			AccountID:            id,
+			PublicAPIKeyID:       *sourcePublicKeyID,
+			BaselineUsagePercent: 0,
+			InitialAmountUSD:     initialCredit,
+			FullAmountUSD:        fullCredit,
+		}); err != nil {
+			_ = h.db.SetError(ctx, id, "deleted")
+			return 0, err
+		}
+	}
+
 	acc := &auth.Account{
 		DBID:         id,
 		RefreshToken: entry.refreshToken,
@@ -642,6 +614,9 @@ func (h *Handler) insertCompatAccount(ctx context.Context, name string, entry co
 		Email:        entry.email,
 		PlanType:     entry.planType,
 		ProxyURL:     entry.proxyURL,
+	}
+	if sourcePublicKeyID != nil && *sourcePublicKeyID > 0 {
+		acc.PublicAPIKeyID = *sourcePublicKeyID
 	}
 	if !entry.expiresAt.IsZero() {
 		acc.ExpiresAt = entry.expiresAt

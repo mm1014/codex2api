@@ -8,7 +8,7 @@ import ToastNotice from '../components/ToastNotice'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { useConfirmDialog } from '../hooks/useConfirmDialog'
 import { useToast } from '../hooks/useToast'
-import type { APIKeyRow, HealthResponse, SystemSettings } from '../types'
+import type { APIKeyRow, HealthResponse, RedeemCodeSummary, SystemSettings } from '../types'
 import { getErrorMessage } from '../utils/error'
 import { formatRelativeTime } from '../utils/time'
 import { Card, CardContent } from '@/components/ui/card'
@@ -57,6 +57,9 @@ export default function Settings() {
   const [newPublicKeyName, setNewPublicKeyName] = useState('')
   const [newPublicKeyValue, setNewPublicKeyValue] = useState('')
   const [createdPublicKey, setCreatedPublicKey] = useState<string | null>(null)
+  const [redeemAmount, setRedeemAmount] = useState('1')
+  const [redeemCodesText, setRedeemCodesText] = useState('')
+  const [importingRedeemCodes, setImportingRedeemCodes] = useState(false)
   const [settingsForm, setSettingsForm] = useState<SystemSettings>({
     max_concurrency: 2,
     global_rpm: 0,
@@ -76,6 +79,8 @@ export default function Settings() {
     fast_scheduler_enabled: false,
     max_retries: 2,
     allow_remote_migration: false,
+    public_initial_credit_usd: 0.1,
+    public_full_credit_usd: 2,
     database_driver: 'postgres',
     database_label: 'PostgreSQL',
     cache_driver: 'redis',
@@ -88,10 +93,11 @@ export default function Settings() {
   const { confirm, confirmDialog } = useConfirmDialog()
 
   const loadSettingsData = useCallback(async () => {
-    const [health, keysResponse, pubKeysResponse, settings, modelsResp] = await Promise.all([
+    const [health, keysResponse, pubKeysResponse, redeemSummaryResponse, settings, modelsResp] = await Promise.all([
       api.getHealth(),
       api.getAPIKeys(),
       api.getPublicAPIKeys(),
+      api.getRedeemCodeSummaries(),
       api.getSettings(),
       api.getModels(),
     ])
@@ -107,6 +113,7 @@ export default function Settings() {
       health,
       keys: keysResponse.keys ?? [],
       pubKeys: pubKeysResponse.keys ?? [],
+      redeemSummaries: redeemSummaryResponse.items ?? [],
     }
   }, [])
 
@@ -114,11 +121,13 @@ export default function Settings() {
     health: HealthResponse | null
     keys: APIKeyRow[]
     pubKeys: APIKeyRow[]
+    redeemSummaries: RedeemCodeSummary[]
   }>({
     initialData: {
       health: null,
       keys: [],
       pubKeys: [],
+      redeemSummaries: [],
     },
     load: loadSettingsData,
   })
@@ -191,6 +200,38 @@ export default function Settings() {
     }
   }
 
+  const handleImportRedeemCodes = async () => {
+    const amount = Number.parseFloat(redeemAmount)
+    if (!Number.isFinite(amount) || amount <= 0) {
+      showToast(t('settings.redeemAmountInvalid'), 'error')
+      return
+    }
+    if (!redeemCodesText.trim()) {
+      showToast(t('settings.redeemCodesEmpty'), 'error')
+      return
+    }
+
+    setImportingRedeemCodes(true)
+    try {
+      const result = await api.importRedeemCodes({
+        amount_usd: amount,
+        codes: redeemCodesText,
+      })
+      showToast(
+        t('settings.redeemImportSuccess', {
+          inserted: result.inserted,
+          duplicates: result.duplicates,
+        }),
+      )
+      setRedeemCodesText('')
+      void reload()
+    } catch (error) {
+      showToast(`${t('settings.redeemImportFailed')}: ${getErrorMessage(error)}`, 'error')
+    } finally {
+      setImportingRedeemCodes(false)
+    }
+  }
+
   const handleCopy = async (text: string) => {
     try {
       if (navigator.clipboard?.writeText) {
@@ -252,7 +293,7 @@ export default function Settings() {
     }
   }
 
-  const { health, keys, pubKeys } = data
+  const { health, keys, pubKeys, redeemSummaries } = data
   const isExternalDatabase = settingsForm.database_driver === 'postgres'
   const isExternalCache = settingsForm.cache_driver === 'redis'
   const showConnectionPool = isExternalDatabase || isExternalCache
@@ -357,86 +398,145 @@ export default function Settings() {
           </CardContent>
         </Card>
 
-        {/* Public Upload API Keys */}
+        {/* Public Upload API Keys + Redeem Codes */}
         <Card className="mb-4">
           <CardContent className="p-6">
-            <div className="flex items-center justify-between gap-4 mb-4">
-              <h3 className="text-base font-semibold text-foreground">{t('settings.publicApiKeys')}</h3>
-            </div>
+            <div className="grid gap-6 lg:grid-cols-2">
+              <div>
+                <h3 className="text-base font-semibold text-foreground mb-4">{t('settings.publicApiKeys')}</h3>
+                <div className="flex gap-2 mb-4 flex-wrap">
+                  <Input
+                    className="flex-[1_1_120px]"
+                    placeholder={t('settings.keyNamePlaceholder')}
+                    value={newPublicKeyName}
+                    onChange={(event: ChangeEvent<HTMLInputElement>) => setNewPublicKeyName(event.target.value)}
+                  />
+                  <Input
+                    className="flex-[2_1_240px]"
+                    placeholder={t('settings.keyValuePlaceholder')}
+                    value={newPublicKeyValue}
+                    onChange={(event: ChangeEvent<HTMLInputElement>) => setNewPublicKeyValue(event.target.value)}
+                    onKeyDown={(event: KeyboardEvent<HTMLInputElement>) => {
+                      if (event.key === 'Enter') {
+                        void handleCreatePublicKey()
+                      }
+                    }}
+                  />
+                  <Button onClick={() => void handleCreatePublicKey()} className="whitespace-nowrap">
+                    {t('settings.createKey')}
+                  </Button>
+                </div>
 
-            <div className="flex gap-2 mb-4 flex-wrap">
-              <Input
-                className="flex-[1_1_120px]"
-                placeholder={t('settings.keyNamePlaceholder')}
-                value={newPublicKeyName}
-                onChange={(event: ChangeEvent<HTMLInputElement>) => setNewPublicKeyName(event.target.value)}
-              />
-              <Input
-                className="flex-[2_1_240px]"
-                placeholder={t('settings.keyValuePlaceholder')}
-                value={newPublicKeyValue}
-                onChange={(event: ChangeEvent<HTMLInputElement>) => setNewPublicKeyValue(event.target.value)}
-                onKeyDown={(event: KeyboardEvent<HTMLInputElement>) => {
-                  if (event.key === 'Enter') {
-                    void handleCreatePublicKey()
-                  }
-                }}
-              />
-              <Button onClick={() => void handleCreatePublicKey()} className="whitespace-nowrap">
-                {t('settings.createKey')}
-              </Button>
-            </div>
+                {createdPublicKey ? (
+                  <div className="p-3 mb-4 rounded-xl bg-[hsl(var(--success-bg))] border border-[hsl(var(--success))]/20 text-sm">
+                    <div className="font-semibold mb-1 text-[hsl(var(--success))]">{t('settings.publicKeyCreated')}</div>
+                    <div className="flex items-center gap-2">
+                      <code className="flex-1 font-mono text-[13px] break-all">{createdPublicKey}</code>
+                      <Button variant="outline" size="sm" onClick={() => void handleCopy(createdPublicKey)}>{t('common.copy')}</Button>
+                    </div>
+                  </div>
+                ) : null}
 
-            {createdPublicKey ? (
-              <div className="p-3 mb-4 rounded-xl bg-[hsl(var(--success-bg))] border border-[hsl(var(--success))]/20 text-sm">
-                <div className="font-semibold mb-1 text-[hsl(var(--success))]">{t('settings.publicKeyCreated')}</div>
-                <div className="flex items-center gap-2">
-                  <code className="flex-1 font-mono text-[13px] break-all">{createdPublicKey}</code>
-                  <Button variant="outline" size="sm" onClick={() => void handleCopy(createdPublicKey)}>{t('common.copy')}</Button>
+                <StateShell
+                  variant="section"
+                  isEmpty={pubKeys.length === 0}
+                  emptyTitle={t('settings.noPublicKeys')}
+                  emptyDescription={t('settings.noPublicKeysDesc')}
+                >
+                  <div className="overflow-auto border border-border rounded-xl">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="text-[13px] font-semibold">{t('common.name')}</TableHead>
+                          <TableHead className="text-[13px] font-semibold">{t('common.key')}</TableHead>
+                          <TableHead className="text-[13px] font-semibold">{t('common.createdAt')}</TableHead>
+                          <TableHead className="text-[13px] font-semibold">{t('common.actions')}</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {pubKeys.map((keyRow) => (
+                          <TableRow key={keyRow.id}>
+                            <TableCell className="text-[14px] font-medium">{keyRow.name}</TableCell>
+                            <TableCell>
+                              <span className="font-mono text-[20px]">{maskKey(keyRow.key)}</span>
+                            </TableCell>
+                            <TableCell className="text-[14px] text-muted-foreground">
+                              {formatRelativeTime(keyRow.created_at, { variant: 'compact' })}
+                            </TableCell>
+                            <TableCell>
+                              <Button variant="destructive" size="sm" onClick={() => void handleDeletePublicKey(keyRow.id)}>
+                                {t('common.delete')}
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </StateShell>
+
+                <div className="text-xs text-muted-foreground mt-3">
+                  {t('settings.publicKeyAuthNote')}
                 </div>
               </div>
-            ) : null}
 
-            <StateShell
-              variant="section"
-              isEmpty={pubKeys.length === 0}
-              emptyTitle={t('settings.noPublicKeys')}
-              emptyDescription={t('settings.noPublicKeysDesc')}
-            >
-              <div className="overflow-auto border border-border rounded-xl">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead className="text-[13px] font-semibold">{t('common.name')}</TableHead>
-                      <TableHead className="text-[13px] font-semibold">{t('common.key')}</TableHead>
-                      <TableHead className="text-[13px] font-semibold">{t('common.createdAt')}</TableHead>
-                      <TableHead className="text-[13px] font-semibold">{t('common.actions')}</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {pubKeys.map((keyRow) => (
-                      <TableRow key={keyRow.id}>
-                        <TableCell className="text-[14px] font-medium">{keyRow.name}</TableCell>
-                        <TableCell>
-                          <span className="font-mono text-[20px]">{maskKey(keyRow.key)}</span>
-                        </TableCell>
-                        <TableCell className="text-[14px] text-muted-foreground">
-                          {formatRelativeTime(keyRow.created_at, { variant: 'compact' })}
-                        </TableCell>
-                        <TableCell>
-                          <Button variant="destructive" size="sm" onClick={() => void handleDeletePublicKey(keyRow.id)}>
-                            {t('common.delete')}
-                          </Button>
-                        </TableCell>
+              <div>
+                <h3 className="text-base font-semibold text-foreground mb-4">{t('settings.redeemCodesTitle')}</h3>
+                <div className="space-y-3">
+                  <div>
+                    <label className="block mb-2 text-sm font-semibold text-muted-foreground">{t('settings.redeemAmountLabel')}</label>
+                    <Input
+                      type="number"
+                      min={0.0001}
+                      step="0.0001"
+                      value={redeemAmount}
+                      onChange={(event: ChangeEvent<HTMLInputElement>) => setRedeemAmount(event.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label className="block mb-2 text-sm font-semibold text-muted-foreground">{t('settings.redeemCodesLabel')}</label>
+                    <textarea
+                      className="w-full min-h-[140px] rounded-md border border-input bg-transparent px-3 py-2 text-sm"
+                      placeholder={t('settings.redeemCodesPlaceholder')}
+                      value={redeemCodesText}
+                      onChange={(event) => setRedeemCodesText(event.target.value)}
+                    />
+                  </div>
+                  <Button onClick={() => void handleImportRedeemCodes()} disabled={importingRedeemCodes}>
+                    {importingRedeemCodes ? t('settings.redeemImporting') : t('settings.redeemImportBtn')}
+                  </Button>
+                </div>
+
+                <div className="mt-4 overflow-auto border border-border rounded-xl">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="text-[13px] font-semibold">{t('settings.redeemAmountCol')}</TableHead>
+                        <TableHead className="text-[13px] font-semibold">{t('settings.redeemCountCol')}</TableHead>
                       </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
+                    </TableHeader>
+                    <TableBody>
+                      {redeemSummaries.length === 0 ? (
+                        <TableRow>
+                          <TableCell colSpan={2} className="text-[13px] text-muted-foreground">
+                            {t('settings.redeemEmpty')}
+                          </TableCell>
+                        </TableRow>
+                      ) : (
+                        redeemSummaries.map((row) => (
+                          <TableRow key={`${row.amount_usd}`}>
+                            <TableCell className="font-mono text-[14px]">${row.amount_usd}</TableCell>
+                            <TableCell className="text-[14px]">{row.count}</TableCell>
+                          </TableRow>
+                        ))
+                      )}
+                    </TableBody>
+                  </Table>
+                </div>
+                <div className="text-xs text-muted-foreground mt-3">
+                  {t('settings.redeemHint')}
+                </div>
               </div>
-            </StateShell>
-
-            <div className="text-xs text-muted-foreground mt-3">
-              {t('settings.publicKeyAuthNote')}
             </div>
           </CardContent>
         </Card>
@@ -517,6 +617,32 @@ export default function Settings() {
                   onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, max_retries: parseInt(e.target.value) || 0 }))}
                 />
                 <p className="text-xs text-muted-foreground mt-1">{t('settings.maxRetriesRange')}</p>
+              </div>
+              <div>
+                <label className="block mb-2 text-sm font-semibold text-muted-foreground">{t('settings.publicInitialCredit')}</label>
+                <Input
+                  type="number"
+                  min={0}
+                  step="0.0001"
+                  value={settingsForm.public_initial_credit_usd}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                    setSettingsForm((f) => ({ ...f, public_initial_credit_usd: Number.parseFloat(e.target.value) || 0 }))
+                  }
+                />
+                <p className="text-xs text-muted-foreground mt-1">{t('settings.publicInitialCreditDesc')}</p>
+              </div>
+              <div>
+                <label className="block mb-2 text-sm font-semibold text-muted-foreground">{t('settings.publicFullCredit')}</label>
+                <Input
+                  type="number"
+                  min={0}
+                  step="0.0001"
+                  value={settingsForm.public_full_credit_usd}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                    setSettingsForm((f) => ({ ...f, public_full_credit_usd: Number.parseFloat(e.target.value) || 0 }))
+                  }
+                />
+                <p className="text-xs text-muted-foreground mt-1">{t('settings.publicFullCreditDesc')}</p>
               </div>
               <div>
                 <label className="block mb-2 text-sm font-semibold text-muted-foreground">{t('settings.testModelLabel')}</label>
@@ -710,6 +836,21 @@ export default function Settings() {
                     <TableCell><Badge variant="secondary" className="text-[13px]">GET</Badge></TableCell>
                     <TableCell className="font-mono text-[20px]">/v1/models</TableCell>
                     <TableCell className="text-[14px] text-muted-foreground">{t('settings.modelList')}</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell><Badge variant="default" className="text-[13px]">POST</Badge></TableCell>
+                    <TableCell className="font-mono text-[20px]">/public/generate</TableCell>
+                    <TableCell className="text-[14px] text-muted-foreground">{t('settings.publicGenerateDesc')}</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell><Badge variant="outline" className="text-[13px]">POST</Badge></TableCell>
+                    <TableCell className="font-mono text-[20px]">/public/redeem</TableCell>
+                    <TableCell className="text-[14px] text-muted-foreground">{t('settings.publicRedeemDesc')}</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell><Badge variant="outline" className="text-[13px]">POST</Badge></TableCell>
+                    <TableCell className="font-mono text-[20px]">/v0/management/auth-files</TableCell>
+                    <TableCell className="text-[14px] text-muted-foreground">{t('settings.publicUploadDesc')}</TableCell>
                   </TableRow>
                 </TableBody>
               </Table>

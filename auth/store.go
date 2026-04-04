@@ -70,6 +70,7 @@ type Account struct {
 	Email          string
 	PlanType       string
 	ProxyURL       string
+	PublicAPIKeyID int64
 	Status         AccountStatus
 	CooldownUtil   time.Time
 	CooldownReason string // rate_limited / unauthorized / 空
@@ -784,27 +785,29 @@ func (a *Account) GetLastUsedAt() time.Time {
 
 // Store 多账号管理器（数据库 + Token 缓存）
 type Store struct {
-	mu                     sync.RWMutex
-	accounts               []*Account
-	globalProxy            string
-	maxConcurrency         int64        // 每账号最大并发数
-	testConcurrency        int64        // 批量测试并发数
-	testModel              atomic.Value // 测试连接使用的模型（string）
-	db                     *database.DB
-	tokenCache             cache.TokenCache
-	usageProbeMu           sync.RWMutex
-	usageProbe             func(context.Context, *Account) error
-	usageProbeBatch        atomic.Bool
-	recoveryProbeBatch     atomic.Bool
-	autoCleanUnauthorized  atomic.Bool
-	autoCleanRateLimited   atomic.Bool
-	autoCleanFullUsageMode atomic.Value // string: off / delete / wait
-	autoCleanError         atomic.Bool
-	autoCleanExpired       atomic.Bool
-	autoCleanupBatch       atomic.Bool
-	maxRetries             int64 // 请求失败最大重试次数（换号重试）
-	stopCh                 chan struct{}
-	wg                     sync.WaitGroup
+	mu                      sync.RWMutex
+	accounts                []*Account
+	globalProxy             string
+	maxConcurrency          int64        // 每账号最大并发数
+	testConcurrency         int64        // 批量测试并发数
+	testModel               atomic.Value // 测试连接使用的模型（string）
+	db                      *database.DB
+	tokenCache              cache.TokenCache
+	usageProbeMu            sync.RWMutex
+	usageProbe              func(context.Context, *Account) error
+	usageProbeBatch         atomic.Bool
+	recoveryProbeBatch      atomic.Bool
+	autoCleanUnauthorized   atomic.Bool
+	autoCleanRateLimited    atomic.Bool
+	autoCleanFullUsageMode  atomic.Value // string: off / delete / wait
+	autoCleanError          atomic.Bool
+	autoCleanExpired        atomic.Bool
+	autoCleanupBatch        atomic.Bool
+	maxRetries              int64 // 请求失败最大重试次数（换号重试）
+	publicInitialCreditX1e4 int64 // 公开上传账号初始入账金额（美元，放大 1e4）
+	publicFullCreditX1e4    int64 // 公开上传账号满额度总金额（美元，放大 1e4）
+	stopCh                  chan struct{}
+	wg                      sync.WaitGroup
 
 	// 代理池
 	proxyPool        []string // 已启用的代理 URL 列表
@@ -837,6 +840,33 @@ func truthyEnv(v string) bool {
 	default:
 		return false
 	}
+}
+
+func moneyToScaled(value float64) int64 {
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0
+	}
+	if value < 0 {
+		value = 0
+	}
+	return int64(math.Round(value * 10000))
+}
+
+func scaledToMoney(value int64) float64 {
+	return float64(value) / 10000
+}
+
+func normalizePublicCredit(initial, full float64) (float64, float64) {
+	if initial <= 0 {
+		initial = 0.1
+	}
+	if full <= 0 {
+		full = 2
+	}
+	if full < initial {
+		full = initial
+	}
+	return initial, full
 }
 
 // NewStore 创建账号管理器
@@ -874,6 +904,9 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 		retries = 2 // 默认重试 2 次
 	}
 	atomic.StoreInt64(&s.maxRetries, retries)
+	initialCredit, fullCredit := normalizePublicCredit(settings.PublicInitialCreditUSD, settings.PublicFullCreditUSD)
+	atomic.StoreInt64(&s.publicInitialCreditX1e4, moneyToScaled(initialCredit))
+	atomic.StoreInt64(&s.publicFullCreditX1e4, moneyToScaled(fullCredit))
 	s.allowRemoteMigration.Store(settings.AllowRemoteMigration)
 	// 环境变量优先，否则读数据库设置
 	fastEnabled := fastSchedulerEnabledFromEnv() || settings.FastSchedulerEnabled
@@ -1154,11 +1187,15 @@ func (s *Store) loadFromDB(ctx context.Context) error {
 		}
 
 		account := &Account{
-			DBID:         row.ID,
-			RefreshToken: rt,
-			ProxyURL:     proxy,
-			HealthTier:   HealthTierWarm,
-			AddedAt:      row.CreatedAt.UnixNano(),
+			DBID:           row.ID,
+			RefreshToken:   rt,
+			ProxyURL:       proxy,
+			HealthTier:     HealthTierWarm,
+			AddedAt:        row.CreatedAt.UnixNano(),
+			PublicAPIKeyID: 0,
+		}
+		if row.PublicAPIKeyID.Valid {
+			account.PublicAPIKeyID = row.PublicAPIKeyID.Int64
 		}
 
 		// 尝试从 credentials 恢复已有的 AT
@@ -1459,6 +1496,23 @@ func (s *Store) SetMaxRetries(n int) {
 // GetMaxRetries 获取当前最大重试次数
 func (s *Store) GetMaxRetries() int {
 	return int(atomic.LoadInt64(&s.maxRetries))
+}
+
+// SetPublicCreditConfig 设置公开上传账号奖励配置（单位：美元）
+func (s *Store) SetPublicCreditConfig(initialUSD, fullUSD float64) {
+	initialUSD, fullUSD = normalizePublicCredit(initialUSD, fullUSD)
+	atomic.StoreInt64(&s.publicInitialCreditX1e4, moneyToScaled(initialUSD))
+	atomic.StoreInt64(&s.publicFullCreditX1e4, moneyToScaled(fullUSD))
+}
+
+// GetPublicInitialCreditUSD 获取公开上传账号初始入账金额（美元）
+func (s *Store) GetPublicInitialCreditUSD() float64 {
+	return scaledToMoney(atomic.LoadInt64(&s.publicInitialCreditX1e4))
+}
+
+// GetPublicFullCreditUSD 获取公开上传账号满额度总金额（美元）
+func (s *Store) GetPublicFullCreditUSD() float64 {
+	return scaledToMoney(atomic.LoadInt64(&s.publicFullCreditX1e4))
 }
 
 // GetAllowRemoteMigration 获取是否允许远程迁移

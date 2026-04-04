@@ -14,6 +14,7 @@ import type {
   OAuthExchangeResponse,
   OAuthURLResponse,
   OpsOverviewResponse,
+  RedeemCodeSummary,
   StatsResponse,
   CPAExportEntry,
   SystemSettings,
@@ -161,6 +162,13 @@ export const api = {
     }),
   deletePublicAPIKey: (id: number) =>
     request<MessageResponse>(`/pubkeys/${id}`, { method: 'DELETE' }),
+  getRedeemCodeSummaries: () =>
+    request<{ items: RedeemCodeSummary[] }>('/redeem-codes'),
+  importRedeemCodes: (data: { amount_usd: number; codes: string }) =>
+    request<{ amount_usd: number; inserted: number; duplicates: number; total: number }>('/redeem-codes/import', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
   clearUsageLogs: () =>
     request<MessageResponse>('/usage/logs', { method: 'DELETE' }),
   getSettings: () => request<SystemSettings>('/settings'),

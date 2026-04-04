@@ -111,6 +111,8 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/pubkeys", h.ListPublicAPIKeys)
 	api.POST("/pubkeys", h.CreatePublicAPIKey)
 	api.DELETE("/pubkeys/:id", h.DeletePublicAPIKey)
+	api.GET("/redeem-codes", h.ListRedeemCodeSummaries)
+	api.POST("/redeem-codes/import", h.ImportRedeemCodes)
 	api.GET("/health", h.GetHealth)
 	api.GET("/ops/overview", h.GetOpsOverview)
 	api.GET("/settings", h.GetSettings)
@@ -228,41 +230,43 @@ func (h *Handler) GetStats(c *gin.Context) {
 // ==================== Accounts ====================
 
 type accountResponse struct {
-	ID                 int64                      `json:"id"`
-	Name               string                     `json:"name"`
-	Email              string                     `json:"email"`
-	PlanType           string                     `json:"plan_type"`
-	Status             string                     `json:"status"`
-	WaitMode           bool                       `json:"wait_mode"`
-	WaitReason         string                     `json:"wait_reason,omitempty"`
-	WaitUntil          string                     `json:"wait_until,omitempty"`
-	WaitRemainingSec   int64                      `json:"wait_remaining_seconds,omitempty"`
-	WaitProbeAt        string                     `json:"wait_probe_at,omitempty"`
-	WaitProbeRemaining int64                      `json:"wait_probe_remaining_seconds,omitempty"`
-	LastFailureStatus  int                        `json:"last_failure_status,omitempty"`
-	LastFailureCode    string                     `json:"last_failure_code,omitempty"`
-	LastFailureMessage string                     `json:"last_failure_message,omitempty"`
-	ATOnly             bool                       `json:"at_only"`
-	HealthTier         string                     `json:"health_tier"`
-	SchedulerScore     float64                    `json:"scheduler_score"`
-	ConcurrencyCap     int64                      `json:"dynamic_concurrency_limit"`
-	ProxyURL           string                     `json:"proxy_url"`
-	CreatedAt          string                     `json:"created_at"`
-	UpdatedAt          string                     `json:"updated_at"`
-	ActiveRequests     int64                      `json:"active_requests"`
-	TotalRequests      int64                      `json:"total_requests"`
-	LastUsedAt         string                     `json:"last_used_at"`
-	SuccessRequests    int64                      `json:"success_requests"`
-	ErrorRequests      int64                      `json:"error_requests"`
-	UsagePercent7d     *float64                   `json:"usage_percent_7d"`
-	UsagePercent5h     *float64                   `json:"usage_percent_5h"`
-	Reset5hAt          string                     `json:"reset_5h_at,omitempty"`
-	Reset7dAt          string                     `json:"reset_7d_at,omitempty"`
-	ScoreBreakdown     schedulerBreakdownResponse `json:"scheduler_breakdown"`
-	LastUnauthorizedAt string                     `json:"last_unauthorized_at,omitempty"`
-	LastRateLimitedAt  string                     `json:"last_rate_limited_at,omitempty"`
-	LastTimeoutAt      string                     `json:"last_timeout_at,omitempty"`
-	LastServerErrorAt  string                     `json:"last_server_error_at,omitempty"`
+	ID                  int64                      `json:"id"`
+	Name                string                     `json:"name"`
+	Email               string                     `json:"email"`
+	PlanType            string                     `json:"plan_type"`
+	UploaderID          *int64                     `json:"uploader_id,omitempty"`
+	SettlementAmountUSD float64                    `json:"settlement_amount_usd"`
+	Status              string                     `json:"status"`
+	WaitMode            bool                       `json:"wait_mode"`
+	WaitReason          string                     `json:"wait_reason,omitempty"`
+	WaitUntil           string                     `json:"wait_until,omitempty"`
+	WaitRemainingSec    int64                      `json:"wait_remaining_seconds,omitempty"`
+	WaitProbeAt         string                     `json:"wait_probe_at,omitempty"`
+	WaitProbeRemaining  int64                      `json:"wait_probe_remaining_seconds,omitempty"`
+	LastFailureStatus   int                        `json:"last_failure_status,omitempty"`
+	LastFailureCode     string                     `json:"last_failure_code,omitempty"`
+	LastFailureMessage  string                     `json:"last_failure_message,omitempty"`
+	ATOnly              bool                       `json:"at_only"`
+	HealthTier          string                     `json:"health_tier"`
+	SchedulerScore      float64                    `json:"scheduler_score"`
+	ConcurrencyCap      int64                      `json:"dynamic_concurrency_limit"`
+	ProxyURL            string                     `json:"proxy_url"`
+	CreatedAt           string                     `json:"created_at"`
+	UpdatedAt           string                     `json:"updated_at"`
+	ActiveRequests      int64                      `json:"active_requests"`
+	TotalRequests       int64                      `json:"total_requests"`
+	LastUsedAt          string                     `json:"last_used_at"`
+	SuccessRequests     int64                      `json:"success_requests"`
+	ErrorRequests       int64                      `json:"error_requests"`
+	UsagePercent7d      *float64                   `json:"usage_percent_7d"`
+	UsagePercent5h      *float64                   `json:"usage_percent_5h"`
+	Reset5hAt           string                     `json:"reset_5h_at,omitempty"`
+	Reset7dAt           string                     `json:"reset_7d_at,omitempty"`
+	ScoreBreakdown      schedulerBreakdownResponse `json:"scheduler_breakdown"`
+	LastUnauthorizedAt  string                     `json:"last_unauthorized_at,omitempty"`
+	LastRateLimitedAt   string                     `json:"last_rate_limited_at,omitempty"`
+	LastTimeoutAt       string                     `json:"last_timeout_at,omitempty"`
+	LastServerErrorAt   string                     `json:"last_server_error_at,omitempty"`
 }
 
 type schedulerBreakdownResponse struct {
@@ -304,15 +308,20 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 	accounts := make([]accountResponse, 0, len(rows))
 	for _, row := range rows {
 		resp := accountResponse{
-			ID:        row.ID,
-			Name:      row.Name,
-			Email:     row.GetCredential("email"),
-			PlanType:  row.GetCredential("plan_type"),
-			Status:    row.Status,
-			ATOnly:    row.GetCredential("refresh_token") == "" && row.GetCredential("access_token") != "",
-			ProxyURL:  row.ProxyURL,
-			CreatedAt: row.CreatedAt.Format(time.RFC3339),
-			UpdatedAt: row.UpdatedAt.Format(time.RFC3339),
+			ID:                  row.ID,
+			Name:                row.Name,
+			Email:               row.GetCredential("email"),
+			PlanType:            row.GetCredential("plan_type"),
+			SettlementAmountUSD: row.SettledAmount,
+			Status:              row.Status,
+			ATOnly:              row.GetCredential("refresh_token") == "" && row.GetCredential("access_token") != "",
+			ProxyURL:            row.ProxyURL,
+			CreatedAt:           row.CreatedAt.Format(time.RFC3339),
+			UpdatedAt:           row.UpdatedAt.Format(time.RFC3339),
+		}
+		if row.PublicAPIKeyID.Valid {
+			uploaderID := row.PublicAPIKeyID.Int64
+			resp.UploaderID = &uploaderID
 		}
 		if acc, ok := accountMap[row.ID]; ok {
 			resp.ActiveRequests = acc.GetActiveRequests()
@@ -1829,7 +1838,7 @@ func (h *Handler) CreatePublicAPIKey(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
-	id, err := h.db.InsertPublicAPIKey(ctx, req.Name, key)
+	id, err := h.db.InsertPublicAPIKeyWithMeta(ctx, req.Name, key, "admin", c.ClientIP(), 0)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, "创建失败: "+err.Error())
 		return
@@ -1865,51 +1874,55 @@ func (h *Handler) DeletePublicAPIKey(c *gin.Context) {
 // ==================== Settings ====================
 
 type settingsResponse struct {
-	MaxConcurrency         int    `json:"max_concurrency"`
-	GlobalRPM              int    `json:"global_rpm"`
-	TestModel              string `json:"test_model"`
-	TestConcurrency        int    `json:"test_concurrency"`
-	ProxyURL               string `json:"proxy_url"`
-	PgMaxConns             int    `json:"pg_max_conns"`
-	RedisPoolSize          int    `json:"redis_pool_size"`
-	AutoCleanUnauthorized  bool   `json:"auto_clean_unauthorized"`
-	AutoCleanRateLimited   bool   `json:"auto_clean_rate_limited"`
-	AdminSecret            string `json:"admin_secret"`
-	AdminAuthSource        string `json:"admin_auth_source"`
-	AutoCleanFullUsage     bool   `json:"auto_clean_full_usage"`
-	AutoCleanFullUsageMode string `json:"auto_clean_full_usage_mode"`
-	AutoCleanError         bool   `json:"auto_clean_error"`
-	AutoCleanExpired       bool   `json:"auto_clean_expired"`
-	ProxyPoolEnabled       bool   `json:"proxy_pool_enabled"`
-	FastSchedulerEnabled   bool   `json:"fast_scheduler_enabled"`
-	MaxRetries             int    `json:"max_retries"`
-	AllowRemoteMigration   bool   `json:"allow_remote_migration"`
-	DatabaseDriver         string `json:"database_driver"`
-	DatabaseLabel          string `json:"database_label"`
-	CacheDriver            string `json:"cache_driver"`
-	CacheLabel             string `json:"cache_label"`
-	ExpiredCleaned         int    `json:"expired_cleaned,omitempty"`
+	MaxConcurrency         int     `json:"max_concurrency"`
+	GlobalRPM              int     `json:"global_rpm"`
+	TestModel              string  `json:"test_model"`
+	TestConcurrency        int     `json:"test_concurrency"`
+	ProxyURL               string  `json:"proxy_url"`
+	PgMaxConns             int     `json:"pg_max_conns"`
+	RedisPoolSize          int     `json:"redis_pool_size"`
+	AutoCleanUnauthorized  bool    `json:"auto_clean_unauthorized"`
+	AutoCleanRateLimited   bool    `json:"auto_clean_rate_limited"`
+	AdminSecret            string  `json:"admin_secret"`
+	AdminAuthSource        string  `json:"admin_auth_source"`
+	AutoCleanFullUsage     bool    `json:"auto_clean_full_usage"`
+	AutoCleanFullUsageMode string  `json:"auto_clean_full_usage_mode"`
+	AutoCleanError         bool    `json:"auto_clean_error"`
+	AutoCleanExpired       bool    `json:"auto_clean_expired"`
+	ProxyPoolEnabled       bool    `json:"proxy_pool_enabled"`
+	FastSchedulerEnabled   bool    `json:"fast_scheduler_enabled"`
+	MaxRetries             int     `json:"max_retries"`
+	AllowRemoteMigration   bool    `json:"allow_remote_migration"`
+	PublicInitialCreditUSD float64 `json:"public_initial_credit_usd"`
+	PublicFullCreditUSD    float64 `json:"public_full_credit_usd"`
+	DatabaseDriver         string  `json:"database_driver"`
+	DatabaseLabel          string  `json:"database_label"`
+	CacheDriver            string  `json:"cache_driver"`
+	CacheLabel             string  `json:"cache_label"`
+	ExpiredCleaned         int     `json:"expired_cleaned,omitempty"`
 }
 
 type updateSettingsReq struct {
-	MaxConcurrency         *int    `json:"max_concurrency"`
-	GlobalRPM              *int    `json:"global_rpm"`
-	TestModel              *string `json:"test_model"`
-	TestConcurrency        *int    `json:"test_concurrency"`
-	ProxyURL               *string `json:"proxy_url"`
-	PgMaxConns             *int    `json:"pg_max_conns"`
-	RedisPoolSize          *int    `json:"redis_pool_size"`
-	AutoCleanUnauthorized  *bool   `json:"auto_clean_unauthorized"`
-	AutoCleanRateLimited   *bool   `json:"auto_clean_rate_limited"`
-	AdminSecret            *string `json:"admin_secret"`
-	AutoCleanFullUsage     *bool   `json:"auto_clean_full_usage"`
-	AutoCleanFullUsageMode *string `json:"auto_clean_full_usage_mode"`
-	AutoCleanError         *bool   `json:"auto_clean_error"`
-	AutoCleanExpired       *bool   `json:"auto_clean_expired"`
-	ProxyPoolEnabled       *bool   `json:"proxy_pool_enabled"`
-	FastSchedulerEnabled   *bool   `json:"fast_scheduler_enabled"`
-	MaxRetries             *int    `json:"max_retries"`
-	AllowRemoteMigration   *bool   `json:"allow_remote_migration"`
+	MaxConcurrency         *int     `json:"max_concurrency"`
+	GlobalRPM              *int     `json:"global_rpm"`
+	TestModel              *string  `json:"test_model"`
+	TestConcurrency        *int     `json:"test_concurrency"`
+	ProxyURL               *string  `json:"proxy_url"`
+	PgMaxConns             *int     `json:"pg_max_conns"`
+	RedisPoolSize          *int     `json:"redis_pool_size"`
+	AutoCleanUnauthorized  *bool    `json:"auto_clean_unauthorized"`
+	AutoCleanRateLimited   *bool    `json:"auto_clean_rate_limited"`
+	AdminSecret            *string  `json:"admin_secret"`
+	AutoCleanFullUsage     *bool    `json:"auto_clean_full_usage"`
+	AutoCleanFullUsageMode *string  `json:"auto_clean_full_usage_mode"`
+	AutoCleanError         *bool    `json:"auto_clean_error"`
+	AutoCleanExpired       *bool    `json:"auto_clean_expired"`
+	ProxyPoolEnabled       *bool    `json:"proxy_pool_enabled"`
+	FastSchedulerEnabled   *bool    `json:"fast_scheduler_enabled"`
+	MaxRetries             *int     `json:"max_retries"`
+	AllowRemoteMigration   *bool    `json:"allow_remote_migration"`
+	PublicInitialCreditUSD *float64 `json:"public_initial_credit_usd"`
+	PublicFullCreditUSD    *float64 `json:"public_full_credit_usd"`
 }
 
 // GetSettings 获取当前系统设置
@@ -1942,6 +1955,8 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		FastSchedulerEnabled:   h.store.FastSchedulerEnabled(),
 		MaxRetries:             h.store.GetMaxRetries(),
 		AllowRemoteMigration:   h.store.GetAllowRemoteMigration() && adminAuthSource != "disabled",
+		PublicInitialCreditUSD: h.store.GetPublicInitialCreditUSD(),
+		PublicFullCreditUSD:    h.store.GetPublicFullCreditUSD(),
 		DatabaseDriver:         h.databaseDriver,
 		DatabaseLabel:          h.databaseLabel,
 		CacheDriver:            h.cacheDriver,
@@ -2106,6 +2121,29 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		log.Printf("设置已更新: max_retries = %d", v)
 	}
 
+	initialCredit := h.store.GetPublicInitialCreditUSD()
+	fullCredit := h.store.GetPublicFullCreditUSD()
+	if req.PublicInitialCreditUSD != nil {
+		initialCredit = *req.PublicInitialCreditUSD
+	}
+	if req.PublicFullCreditUSD != nil {
+		fullCredit = *req.PublicFullCreditUSD
+	}
+	if req.PublicInitialCreditUSD != nil || req.PublicFullCreditUSD != nil {
+		if initialCredit < 0 {
+			initialCredit = 0
+		}
+		if fullCredit < 0 {
+			fullCredit = 0
+		}
+		if fullCredit < initialCredit {
+			writeError(c, http.StatusBadRequest, "full_credit 必须大于或等于 initial_credit")
+			return
+		}
+		h.store.SetPublicCreditConfig(initialCredit, fullCredit)
+		log.Printf("设置已更新: public_credit initial=%.4f full=%.4f", h.store.GetPublicInitialCreditUSD(), h.store.GetPublicFullCreditUSD())
+	}
+
 	if req.AllowRemoteMigration != nil {
 		if *req.AllowRemoteMigration && !hasAdminSecret {
 			writeError(c, http.StatusBadRequest, "请先设置管理密钥，再启用远程迁移")
@@ -2137,6 +2175,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		FastSchedulerEnabled:   h.store.FastSchedulerEnabled(),
 		MaxRetries:             h.store.GetMaxRetries(),
 		AllowRemoteMigration:   h.store.GetAllowRemoteMigration() && hasAdminSecret,
+		PublicInitialCreditUSD: h.store.GetPublicInitialCreditUSD(),
+		PublicFullCreditUSD:    h.store.GetPublicFullCreditUSD(),
 	})
 	if err != nil {
 		log.Printf("无法持久化保存设置: %v", err)
@@ -2175,6 +2215,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		FastSchedulerEnabled:   h.store.FastSchedulerEnabled(),
 		MaxRetries:             h.store.GetMaxRetries(),
 		AllowRemoteMigration:   h.store.GetAllowRemoteMigration() && adminAuthSource != "disabled",
+		PublicInitialCreditUSD: h.store.GetPublicInitialCreditUSD(),
+		PublicFullCreditUSD:    h.store.GetPublicFullCreditUSD(),
 		DatabaseDriver:         h.databaseDriver,
 		DatabaseLabel:          h.databaseLabel,
 		CacheDriver:            h.cacheDriver,
@@ -2616,7 +2658,7 @@ func (h *Handler) importCompatAccountsCommon(c *gin.Context, items []compatImpor
 			}
 
 			insertCtx, insertCancel := context.WithTimeout(context.Background(), 10*time.Second)
-			_, err := h.insertCompatAccount(insertCtx, name, it.entry)
+			_, err := h.insertCompatAccount(insertCtx, name, it.entry, nil)
 			insertCancel()
 
 			if err != nil {

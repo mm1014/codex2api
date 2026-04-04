@@ -121,6 +121,23 @@ func (h *Handler) logUsage(input *database.UsageLogInput) {
 	_ = h.db.InsertUsageLog(context.Background(), input)
 }
 
+func (h *Handler) settlePublicAccountUsage(account *auth.Account, usagePct float64) {
+	if h == nil || h.db == nil || account == nil {
+		return
+	}
+	account.Mu().RLock()
+	publicKeyID := account.PublicAPIKeyID
+	account.Mu().RUnlock()
+	if publicKeyID == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if _, err := h.db.SettlePublicAccountUsage(ctx, account.ID(), usagePct); err != nil {
+		log.Printf("[账号 %d] 公开上传结算失败: %v", account.ID(), err)
+	}
+}
+
 // extractReasoningEffort 从请求体提取推理强度
 // 支持 reasoning.effort（Responses API）和 reasoning_effort（Chat Completions API）
 func extractReasoningEffort(body []byte) string {
@@ -534,6 +551,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			}
 			if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {
 				h.store.PersistUsageSnapshot(account, usagePct)
+				h.settlePublicAccountUsage(account, usagePct)
 			}
 			errBody, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
@@ -691,6 +709,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			recyclePooledClientForAccount(account)
 			if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {
 				h.store.PersistUsageSnapshot(account, usagePct)
+				h.settlePublicAccountUsage(account, usagePct)
 			}
 			h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
 			resp.Body.Close()
@@ -756,6 +775,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		resp.Body.Close()
 		if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {
 			h.store.PersistUsageSnapshot(account, usagePct)
+			h.settlePublicAccountUsage(account, usagePct)
 		}
 		if outcome.penalize {
 			recyclePooledClientForAccount(account)
@@ -900,6 +920,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			}
 			if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {
 				h.store.PersistUsageSnapshot(account, usagePct)
+				h.settlePublicAccountUsage(account, usagePct)
 			}
 			errBody, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
@@ -1097,6 +1118,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			recyclePooledClientForAccount(account)
 			if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {
 				h.store.PersistUsageSnapshot(account, usagePct)
+				h.settlePublicAccountUsage(account, usagePct)
 			}
 			h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
 			resp.Body.Close()
@@ -1162,6 +1184,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		resp.Body.Close()
 		if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {
 			h.store.PersistUsageSnapshot(account, usagePct)
+			h.settlePublicAccountUsage(account, usagePct)
 		}
 		if outcome.penalize {
 			recyclePooledClientForAccount(account)

@@ -78,6 +78,11 @@ function roundTo2(value: number): number {
   return Math.round(value * 100) / 100
 }
 
+function formatUSD(value?: number | null): string {
+  const amount = typeof value === 'number' && Number.isFinite(value) ? value : 0
+  return amount.toFixed(4).replace(/\.?0+$/, '')
+}
+
 export default function Accounts() {
   const { t } = useTranslation()
   const [showAdd, setShowAdd] = useState(false)
@@ -1006,7 +1011,7 @@ export default function Accounts() {
                           </div>
                         </TableCell>
                         <TableCell>
-                          <UsageCell account={account} />
+                          <UsageCell account={account} t={t} />
                         </TableCell>
                         <TableCell className="text-[13px] text-muted-foreground whitespace-nowrap">{formatBeijingTime(account.created_at)}</TableCell>
                         <TableCell className="text-[14px] text-muted-foreground">{formatRelativeTime(account.updated_at)}</TableCell>
@@ -1870,36 +1875,42 @@ function UsageBar({ label, pct, resetAt }: { label: string; pct: number; resetAt
 }
 
 // 用量列组件
-function UsageCell({ account }: { account: AccountRow }) {
+function UsageCell({ account, t }: { account: AccountRow; t: (key: string, options?: Record<string, unknown>) => string }) {
   const plan = (account.plan_type || '').toLowerCase()
   const has7d = account.usage_percent_7d !== null && account.usage_percent_7d !== undefined
   const has5h = account.usage_percent_5h !== null && account.usage_percent_5h !== undefined
+  const uploaderText = account.uploader_id
+    ? t('accounts.uploadSourceUser', {
+        id: account.uploader_id,
+        amount: formatUSD(account.settlement_amount_usd),
+      })
+    : t('accounts.uploadSourceAdmin')
+
+  const wrap = (content: JSX.Element, widthClass: string) => (
+    <div className={`${widthClass} space-y-1`}>
+      <div className="text-[11px] text-muted-foreground">{uploaderText}</div>
+      {content}
+    </div>
+  )
 
   if (plan === 'free') {
-    if (!has7d) return <span className="text-[12px] text-muted-foreground">-</span>
-    return (
-      <div className="w-40">
-        <UsageBar label="7d" pct={account.usage_percent_7d!} resetAt={account.reset_7d_at} />
-      </div>
-    )
+    if (!has7d) return wrap(<span className="text-[12px] text-muted-foreground">-</span>, 'w-40')
+    return wrap(<UsageBar label="7d" pct={account.usage_percent_7d!} resetAt={account.reset_7d_at} />, 'w-40')
   }
 
   if (plan === 'pro' || plan === 'team') {
-    if (!has5h && !has7d) return <span className="text-[12px] text-muted-foreground">-</span>
-    return (
-      <div className="w-48 space-y-1.5">
+    if (!has5h && !has7d) return wrap(<span className="text-[12px] text-muted-foreground">-</span>, 'w-48')
+    return wrap(
+      <div className="space-y-1.5">
         {has5h && <UsageBar label="5h" pct={account.usage_percent_5h!} resetAt={account.reset_5h_at} />}
         {has7d && <UsageBar label="7d" pct={account.usage_percent_7d!} resetAt={account.reset_7d_at} />}
-      </div>
+      </div>,
+      'w-48',
     )
   }
 
   if (has7d) {
-    return (
-      <div className="w-40">
-        <UsageBar label="7d" pct={account.usage_percent_7d!} resetAt={account.reset_7d_at} />
-      </div>
-    )
+    return wrap(<UsageBar label="7d" pct={account.usage_percent_7d!} resetAt={account.reset_7d_at} />, 'w-40')
   }
-  return <span className="text-[13px] text-muted-foreground">-</span>
+  return wrap(<span className="text-[13px] text-muted-foreground">-</span>, 'w-40')
 }

@@ -20,6 +20,8 @@ export interface AccountRow {
   name: string
   email: string
   plan_type: string
+  uploader_id?: number | null
+  settlement_amount_usd?: number
   status: AccountStatus
   wait_mode?: boolean
   wait_reason?: string
@@ -192,11 +194,18 @@ export interface SystemSettings {
   fast_scheduler_enabled: boolean
   max_retries: number
   allow_remote_migration: boolean
+  public_initial_credit_usd: number
+  public_full_credit_usd: number
   database_driver: string
   database_label: string
   cache_driver: string
   cache_label: string
   expired_cleaned?: number
+}
+
+export interface RedeemCodeSummary {
+  amount_usd: number
+  count: number
 }
 
 export interface CPAExportEntry {
