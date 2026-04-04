@@ -477,12 +477,33 @@ func (h *Handler) importCompatPayload(ctx context.Context, nameHint string, data
 		return nil, errors.New("未解析到有效账号")
 	}
 
+	dedupeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	existingRTs, err := h.db.GetAllRefreshTokens(dedupeCtx)
+	if err != nil {
+		return nil, fmt.Errorf("读取已有 refresh_token 失败: %w", err)
+	}
+	existingATs, err := h.db.GetAllAccessTokens(dedupeCtx)
+	if err != nil {
+		return nil, fmt.Errorf("读取已有 access_token 失败: %w", err)
+	}
+
 	var uploaded []string
+	duplicateCount := 0
 	for idx, entry := range entries {
 		parsed := parseCompatEntry(entry)
-		if parsed.refreshToken == "" && parsed.accessToken == "" {
+		refreshToken := strings.TrimSpace(parsed.refreshToken)
+		accessToken := strings.TrimSpace(parsed.accessToken)
+		if refreshToken == "" && accessToken == "" {
 			continue
 		}
+		if isCompatTokenDuplicate(existingRTs, existingATs, refreshToken, accessToken) {
+			duplicateCount++
+			continue
+		}
+		markCompatTokenSeen(existingRTs, existingATs, refreshToken, accessToken)
+		parsed.refreshToken = refreshToken
+		parsed.accessToken = accessToken
 
 		name := buildCompatName(nameHint, parsed.email, idx, len(entries))
 		id, errInsert := h.insertCompatAccount(ctx, name, parsed, sourcePublicKeyID)
@@ -494,9 +515,31 @@ func (h *Handler) importCompatPayload(ctx context.Context, nameHint string, data
 	}
 
 	if len(uploaded) == 0 {
+		if duplicateCount > 0 {
+			return nil, errors.New("上传账号均已存在（重复 token）")
+		}
 		return nil, errors.New("未解析到有效账号")
 	}
 	return uploaded, nil
+}
+
+func isCompatTokenDuplicate(existingRTs, existingATs map[string]bool, refreshToken, accessToken string) bool {
+	if refreshToken != "" && existingRTs[refreshToken] {
+		return true
+	}
+	if accessToken != "" && existingATs[accessToken] {
+		return true
+	}
+	return false
+}
+
+func markCompatTokenSeen(existingRTs, existingATs map[string]bool, refreshToken, accessToken string) {
+	if refreshToken != "" {
+		existingRTs[refreshToken] = true
+	}
+	if accessToken != "" {
+		existingATs[accessToken] = true
+	}
 }
 
 type compatEntry struct {
