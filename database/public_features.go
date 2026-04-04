@@ -21,6 +21,21 @@ type PublicAPIKeyAuth struct {
 	LastUsedIP string
 }
 
+// PublicAPIKeyOverview 公开密钥概览信息
+type PublicAPIKeyOverview struct {
+	ID                int64
+	Name              string
+	Key               string
+	Source            string
+	BalanceUSD        float64
+	CreatedIP         string
+	LastUsedIP        string
+	CreatedAt         time.Time
+	LastUsedAt        sql.NullTime
+	BoundAccountCount int64
+	SettledAmountUSD  float64
+}
+
 // PublicSettlementBindInput 账号绑定公开密钥时的结算初始化参数
 type PublicSettlementBindInput struct {
 	AccountID            int64
@@ -115,6 +130,74 @@ func (db *DB) GetPublicAPIKeyByValue(ctx context.Context, key string) (*PublicAP
 	if err != nil {
 		return nil, err
 	}
+	return row, nil
+}
+
+// GetPublicAPIKeyOverview 获取公开密钥概览（含绑定账号与已结算金额）
+func (db *DB) GetPublicAPIKeyOverview(ctx context.Context, id int64) (*PublicAPIKeyOverview, error) {
+	if id == 0 {
+		return nil, sql.ErrNoRows
+	}
+
+	query := `
+		SELECT
+			k.id,
+			k.name,
+			k.key,
+			COALESCE(k.source, 'admin') AS source,
+			COALESCE(k.balance_usd, 0) AS balance_usd,
+			COALESCE(k.created_ip, '') AS created_ip,
+			COALESCE(k.last_used_ip, '') AS last_used_ip,
+			k.created_at,
+			k.last_used_at,
+			COALESCE(stats.bound_account_count, 0) AS bound_account_count,
+			COALESCE(stats.settled_amount_usd, 0) AS settled_amount_usd
+		FROM public_api_keys k
+		LEFT JOIN (
+			SELECT
+				s.public_api_key_id,
+				COUNT(*) AS bound_account_count,
+				COALESCE(SUM(s.settled_amount_usd), 0) AS settled_amount_usd
+			FROM public_account_settlements s
+			JOIN accounts a ON a.id = s.account_id
+			WHERE COALESCE(a.error_message, '') <> 'deleted'
+			GROUP BY s.public_api_key_id
+		) stats ON stats.public_api_key_id = k.id
+		WHERE k.id = $1
+	`
+
+	row := &PublicAPIKeyOverview{}
+	var (
+		createdAtRaw  interface{}
+		lastUsedAtRaw interface{}
+	)
+	err := db.conn.QueryRowContext(ctx, query, id).Scan(
+		&row.ID,
+		&row.Name,
+		&row.Key,
+		&row.Source,
+		&row.BalanceUSD,
+		&row.CreatedIP,
+		&row.LastUsedIP,
+		&createdAtRaw,
+		&lastUsedAtRaw,
+		&row.BoundAccountCount,
+		&row.SettledAmountUSD,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	row.CreatedAt, err = parseDBTimeValue(createdAtRaw)
+	if err != nil {
+		return nil, err
+	}
+	row.LastUsedAt, err = parseDBNullTimeValue(lastUsedAtRaw)
+	if err != nil {
+		return nil, err
+	}
+	row.BalanceUSD = roundUSD(row.BalanceUSD)
+	row.SettledAmountUSD = roundUSD(row.SettledAmountUSD)
 	return row, nil
 }
 

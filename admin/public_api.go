@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +22,8 @@ func (h *Handler) RegisterPublicRoutes(r *gin.Engine) {
 	group := r.Group("/public")
 	group.POST("/generate", h.PublicGenerateKey)
 	group.POST("/redeem", h.publicAPIKeyAuthMiddleware(), h.PublicRedeem)
+	group.GET("/key-info", h.publicAPIKeyAuthMiddleware(), h.PublicKeyInfo)
+	group.GET("/quota-stats", h.PublicQuotaStats)
 }
 
 func extractPublicKeyFromRequest(c *gin.Context) string {
@@ -212,6 +216,151 @@ func (h *Handler) PublicRedeem(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, result)
+}
+
+// PublicKeyInfo 返回当前公开 key 的概览信息
+func (h *Handler) PublicKeyInfo(c *gin.Context) {
+	keyAuth, ok := h.getPublicAPIKeyFromContext(c)
+	if !ok || keyAuth.ID == 0 {
+		writeError(c, http.StatusUnauthorized, "公开上传密钥无效或缺失")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	info, err := h.db.GetPublicAPIKeyOverview(ctx, keyAuth.ID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			writeError(c, http.StatusUnauthorized, "公开上传密钥无效或缺失")
+			return
+		}
+		writeInternalError(c, err)
+		return
+	}
+
+	lastUsedAt := ""
+	if info.LastUsedAt.Valid {
+		lastUsedAt = info.LastUsedAt.Time.Format(time.RFC3339)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"id":                  info.ID,
+		"name":                info.Name,
+		"source":              info.Source,
+		"balance_usd":         info.BalanceUSD,
+		"created_ip":          info.CreatedIP,
+		"created_at":          info.CreatedAt.Format(time.RFC3339),
+		"last_used_ip":        info.LastUsedIP,
+		"last_used_at":        lastUsedAt,
+		"bound_account_count": info.BoundAccountCount,
+		"settled_amount_usd":  info.SettledAmountUSD,
+	})
+}
+
+func parsePublicUsagePercent(raw string) float64 {
+	value, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0
+	}
+	return clampPublicUsagePercent(value)
+}
+
+func clampPublicUsagePercent(value float64) float64 {
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0
+	}
+	if value < 0 {
+		return 0
+	}
+	if value > 100 {
+		return 100
+	}
+	return value
+}
+
+func roundTo2(value float64) float64 {
+	return math.Round(value*100) / 100
+}
+
+func deriveQuotaStatus(row *database.AccountRow, now time.Time) string {
+	if row == nil {
+		return ""
+	}
+	if strings.EqualFold(strings.TrimSpace(row.ErrorMessage), "deleted") {
+		return "deleted"
+	}
+	if row.CooldownReason == "unauthorized" && row.CooldownUntil.Valid && row.CooldownUntil.Time.After(now) {
+		return "unauthorized"
+	}
+	return row.Status
+}
+
+// PublicQuotaStats 返回账号页额度统计（口径与账号管理一致，排除 unauthorized 和 deleted）
+func (h *Handler) PublicQuotaStats(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	rows, err := h.db.ListActive(ctx)
+	if err != nil {
+		writeInternalError(c, err)
+		return
+	}
+
+	now := time.Now()
+	quotaAccountCount := 0
+	usageSum := 0.0
+
+	for _, row := range rows {
+		status := deriveQuotaStatus(row, now)
+		var runtimeUsage float64
+		runtimeUsageValid := false
+		if h.store != nil {
+			if acc := h.store.FindByID(row.ID); acc != nil {
+				status = acc.RuntimeStatus()
+				if usage, ok := acc.GetUsagePercent7d(); ok {
+					runtimeUsage = clampPublicUsagePercent(usage)
+					runtimeUsageValid = true
+				}
+			}
+		}
+
+		if status == "unauthorized" || status == "deleted" {
+			continue
+		}
+
+		quotaAccountCount++
+
+		usage := parsePublicUsagePercent(row.GetCredential("codex_7d_used_percent"))
+		if runtimeUsageValid {
+			usage = runtimeUsage
+		}
+		usageSum += usage
+	}
+
+	quotaTotal := quotaAccountCount * 100
+	quotaUsed := int(math.Round(usageSum))
+	quotaRemaining := quotaTotal - quotaUsed
+	if quotaRemaining < 0 {
+		quotaRemaining = 0
+	}
+
+	quotaUsedPercent := 0.0
+	quotaRemainingPercent := 0.0
+	if quotaTotal > 0 {
+		quotaUsedPercent = roundTo2((float64(quotaUsed) / float64(quotaTotal)) * 100)
+		quotaRemainingPercent = roundTo2((float64(quotaRemaining) / float64(quotaTotal)) * 100)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"quota_account_count":      quotaAccountCount,
+		"quota_total":              quotaTotal,
+		"quota_used":               quotaUsed,
+		"quota_remaining":          quotaRemaining,
+		"quota_used_percent":       quotaUsedPercent,
+		"quota_remaining_percent":  quotaRemainingPercent,
+		"quota_remaining_accounts": roundTo2(float64(quotaRemaining) / 100),
+	})
 }
 
 type importRedeemCodesReq struct {

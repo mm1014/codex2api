@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/codex2api/database"
 	"github.com/gin-gonic/gin"
 )
 
@@ -86,5 +88,182 @@ func TestPublicRedeemSuccess(t *testing.T) {
 	}
 	if payload.RemainingBalance != 0.5 {
 		t.Fatalf("remaining_balance=%.4f, want=0.5", payload.RemainingBalance)
+	}
+}
+
+func TestPublicKeyInfoRequiresPublicKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := newSQLiteDBForAdminTest(t)
+	h := &Handler{db: db}
+
+	r := gin.New()
+	h.RegisterPublicRoutes(r)
+
+	req := httptest.NewRequest(http.MethodGet, "/public/key-info", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden && rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d, want=%d or %d, body=%s", rec.Code, http.StatusForbidden, http.StatusUnauthorized, rec.Body.String())
+	}
+}
+
+func TestPublicKeyInfoSuccess(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := newSQLiteDBForAdminTest(t)
+	h := &Handler{db: db}
+
+	ctx := context.Background()
+	key := "pk-info-test-1234567890"
+	keyID, err := db.InsertPublicAPIKeyWithMeta(ctx, "pub-info", key, "public_generate", "10.0.0.10", 0)
+	if err != nil {
+		t.Fatalf("insert public key: %v", err)
+	}
+
+	accountID, err := db.InsertATAccount(ctx, "acc-info", "at-token-info", "")
+	if err != nil {
+		t.Fatalf("insert account: %v", err)
+	}
+
+	if err := db.BindAccountToPublicKey(ctx, database.PublicSettlementBindInput{
+		AccountID:            accountID,
+		PublicAPIKeyID:       keyID,
+		BaselineUsagePercent: 0,
+		InitialAmountUSD:     0.4,
+		FullAmountUSD:        2.0,
+	}); err != nil {
+		t.Fatalf("bind account to key: %v", err)
+	}
+
+	r := gin.New()
+	h.RegisterPublicRoutes(r)
+
+	req := httptest.NewRequest(http.MethodGet, "/public/key-info", nil)
+	req.Header.Set("X-Public-Key", key)
+	req.Header.Set("X-Forwarded-For", "10.0.0.11")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want=%d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var payload struct {
+		ID                int64   `json:"id"`
+		Source            string  `json:"source"`
+		BalanceUSD        float64 `json:"balance_usd"`
+		BoundAccountCount int64   `json:"bound_account_count"`
+		SettledAmountUSD  float64 `json:"settled_amount_usd"`
+		LastUsedIP        string  `json:"last_used_ip"`
+		LastUsedAt        string  `json:"last_used_at"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	if payload.ID != keyID {
+		t.Fatalf("id=%d, want=%d", payload.ID, keyID)
+	}
+	if payload.Source != "public_generate" {
+		t.Fatalf("source=%q, want=%q", payload.Source, "public_generate")
+	}
+	if payload.BoundAccountCount != 1 {
+		t.Fatalf("bound_account_count=%d, want=1", payload.BoundAccountCount)
+	}
+	if payload.SettledAmountUSD != 0.4 {
+		t.Fatalf("settled_amount_usd=%.4f, want=0.4", payload.SettledAmountUSD)
+	}
+	if payload.BalanceUSD != 0.4 {
+		t.Fatalf("balance_usd=%.4f, want=0.4", payload.BalanceUSD)
+	}
+	if payload.LastUsedIP != "10.0.0.11" {
+		t.Fatalf("last_used_ip=%q, want=%q", payload.LastUsedIP, "10.0.0.11")
+	}
+	if payload.LastUsedAt == "" {
+		t.Fatalf("last_used_at should not be empty")
+	}
+}
+
+func TestPublicQuotaStatsExcludeUnauthorizedAndDeleted(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := newSQLiteDBForAdminTest(t)
+	h := &Handler{db: db}
+
+	ctx := context.Background()
+	activeID, err := db.InsertATAccount(ctx, "active", "at-token-active", "")
+	if err != nil {
+		t.Fatalf("insert active account: %v", err)
+	}
+	if err := db.UpdateCredentials(ctx, activeID, map[string]interface{}{
+		"codex_7d_used_percent": 80.0,
+	}); err != nil {
+		t.Fatalf("update active usage: %v", err)
+	}
+
+	unauthorizedID, err := db.InsertATAccount(ctx, "unauthorized", "at-token-unauth", "")
+	if err != nil {
+		t.Fatalf("insert unauthorized account: %v", err)
+	}
+	if err := db.UpdateCredentials(ctx, unauthorizedID, map[string]interface{}{
+		"codex_7d_used_percent": 55.0,
+	}); err != nil {
+		t.Fatalf("update unauthorized usage: %v", err)
+	}
+	if err := db.SetCooldown(ctx, unauthorizedID, "unauthorized", time.Now().Add(2*time.Hour)); err != nil {
+		t.Fatalf("set unauthorized cooldown: %v", err)
+	}
+
+	deletedID, err := db.InsertATAccount(ctx, "deleted", "at-token-deleted", "")
+	if err != nil {
+		t.Fatalf("insert deleted account: %v", err)
+	}
+	if err := db.SetError(ctx, deletedID, "deleted"); err != nil {
+		t.Fatalf("set deleted error: %v", err)
+	}
+
+	r := gin.New()
+	h.RegisterPublicRoutes(r)
+
+	req := httptest.NewRequest(http.MethodGet, "/public/quota-stats", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want=%d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var payload struct {
+		QuotaAccountCount      int     `json:"quota_account_count"`
+		QuotaTotal             int     `json:"quota_total"`
+		QuotaUsed              int     `json:"quota_used"`
+		QuotaRemaining         int     `json:"quota_remaining"`
+		QuotaUsedPercent       float64 `json:"quota_used_percent"`
+		QuotaRemainingPercent  float64 `json:"quota_remaining_percent"`
+		QuotaRemainingAccounts float64 `json:"quota_remaining_accounts"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	if payload.QuotaAccountCount != 1 {
+		t.Fatalf("quota_account_count=%d, want=1", payload.QuotaAccountCount)
+	}
+	if payload.QuotaTotal != 100 {
+		t.Fatalf("quota_total=%d, want=100", payload.QuotaTotal)
+	}
+	if payload.QuotaUsed != 80 {
+		t.Fatalf("quota_used=%d, want=80", payload.QuotaUsed)
+	}
+	if payload.QuotaRemaining != 20 {
+		t.Fatalf("quota_remaining=%d, want=20", payload.QuotaRemaining)
+	}
+	if payload.QuotaUsedPercent != 80 {
+		t.Fatalf("quota_used_percent=%.2f, want=80", payload.QuotaUsedPercent)
+	}
+	if payload.QuotaRemainingPercent != 20 {
+		t.Fatalf("quota_remaining_percent=%.2f, want=20", payload.QuotaRemainingPercent)
+	}
+	if payload.QuotaRemainingAccounts != 0.2 {
+		t.Fatalf("quota_remaining_accounts=%.2f, want=0.2", payload.QuotaRemainingAccounts)
 	}
 }
