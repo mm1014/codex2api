@@ -95,20 +95,8 @@ func RefreshAccessToken(ctx context.Context, refreshToken string, proxyURL strin
 		td.RefreshToken = refreshToken
 	}
 
-	// 解析 id_token / access_token 获取账号信息（两者口径不同，取更可信套餐值）
+	// 解析 id_token 获取账号信息（与 CPA 逻辑一致）
 	info := parseIDToken(tokenResp.IDToken)
-	if atInfo := ParseAccessToken(td.AccessToken); atInfo != nil {
-		if info == nil {
-			info = &AccountInfo{}
-		}
-		if strings.TrimSpace(info.Email) == "" {
-			info.Email = strings.TrimSpace(atInfo.Email)
-		}
-		if strings.TrimSpace(info.ChatGPTAccountID) == "" {
-			info.ChatGPTAccountID = strings.TrimSpace(atInfo.ChatGPTAccountID)
-		}
-		info.PlanType = PreferPlanType(atInfo.PlanType, info.PlanType)
-	}
 	if info != nil {
 		info.PlanType = NormalizePlanType(info.PlanType)
 	}
