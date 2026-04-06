@@ -260,6 +260,27 @@ func shouldTransparentRetryStream(outcome streamOutcome, attempt int, maxRetries
 	return true
 }
 
+func isTerminalUpstreamEvent(eventType string) bool {
+	return eventType == "response.completed" || eventType == "response.failed"
+}
+
+// isUserVisibleDeltaEvent 判断事件是否已经产生对下游可见的正文增量。
+// 仅在首个可见增量前断流时才允许透明重试，避免重复输出。
+func isUserVisibleDeltaEvent(eventType string, data []byte) bool {
+	if !strings.HasSuffix(eventType, ".delta") {
+		return false
+	}
+	delta := gjson.GetBytes(data, "delta")
+	if !delta.Exists() {
+		// 没有 delta 字段时，保守视为可见，避免无限缓冲。
+		return true
+	}
+	if delta.Type == gjson.String {
+		return strings.TrimSpace(delta.String()) != ""
+	}
+	return strings.TrimSpace(delta.Raw) != "" && delta.Raw != "null"
+}
+
 func schedulerLatency(totalDurationMs, firstTokenMs int) time.Duration {
 	if firstTokenMs > 0 {
 		return time.Duration(firstTokenMs) * time.Millisecond
@@ -624,7 +645,9 @@ func (h *Handler) Responses(c *gin.Context) {
 		deltaCharCount := 0  // 累计 delta 字符数（用于断流时估算 token）
 		var readErr error
 		var writeErr error
-		wroteAnyBody := false
+		wroteAnyBytes := false
+		wroteVisibleBody := false
+		pendingFrames := make([]string, 0, 8)
 		var responseJSON []byte
 
 		if isStream {
@@ -643,9 +666,21 @@ func (h *Handler) Responses(c *gin.Context) {
 				h.store.Release(account)
 				return
 			}
+			// 先发一个 SSE 注释帧，避免前置代理/网关等待首包超时（如 524）。
+			if _, err := fmt.Fprint(c.Writer, ": keep-alive\n\n"); err != nil {
+				c.JSON(http.StatusBadGateway, gin.H{
+					"error": gin.H{"message": "下游连接写入失败", "type": "upstream_error"},
+				})
+				resp.Body.Close()
+				h.store.Release(account)
+				return
+			}
+			wroteAnyBytes = true
+			flusher.Flush()
 
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
 				eventType := gjson.GetBytes(data, "type").String()
+				visibleEvent := isUserVisibleDeltaEvent(eventType, data)
 
 				// TTFT: 记录第一个 output_text.delta 事件的时间
 				if !ttftRecorded && eventType == "response.output_text.delta" {
@@ -673,13 +708,32 @@ func (h *Handler) Responses(c *gin.Context) {
 					gotTerminal = true
 				}
 
-				if _, err := fmt.Fprintf(c.Writer, "data: %s\n\n", data); err != nil {
+				frame := fmt.Sprintf("data: %s\n\n", data)
+				if !wroteVisibleBody {
+					// 首个可见正文前先缓冲，若上游在此阶段断流可透明重试。
+					if !visibleEvent && !isTerminalUpstreamEvent(eventType) {
+						pendingFrames = append(pendingFrames, frame)
+						return true
+					}
+					for _, pending := range pendingFrames {
+						if _, err := fmt.Fprint(c.Writer, pending); err != nil {
+							writeErr = err
+							return false
+						}
+					}
+					pendingFrames = pendingFrames[:0]
+				}
+
+				if _, err := fmt.Fprint(c.Writer, frame); err != nil {
 					writeErr = err
 					return false
 				}
-				wroteAnyBody = true
+				wroteAnyBytes = true
+				if visibleEvent {
+					wroteVisibleBody = true
+				}
 				flusher.Flush()
-				return eventType != "response.completed" && eventType != "response.failed"
+				return !isTerminalUpstreamEvent(eventType)
 			})
 		} else {
 			// 非流式收集
@@ -725,13 +779,14 @@ func (h *Handler) Responses(c *gin.Context) {
 		// 断流检测 + token 估算
 		totalDuration := int(time.Since(start).Milliseconds())
 		outcome := classifyStreamOutcome(c.Request.Context().Err(), readErr, writeErr, gotTerminal)
-		if shouldTransparentRetryStream(outcome, attempt, maxRetries, wroteAnyBody, c.Request.Context().Err(), writeErr) {
+		if shouldTransparentRetryStream(outcome, attempt, maxRetries, wroteVisibleBody, c.Request.Context().Err(), writeErr) {
 			log.Printf("上游流在首包前断开，重置连接并重试 (attempt %d/%d, account %d, /v1/responses): %s", attempt+1, maxRetries+1, account.ID(), outcome.failureMessage)
 			recyclePooledClientForAccount(account)
 			h.persistUsageAndSettleFromResponse(account, resp)
 			h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
 			resp.Body.Close()
 			h.store.Release(account)
+			excludeAccounts[account.ID()] = true
 			lastErr = readErr
 			if lastErr == nil {
 				lastErr = errors.New(outcome.failureMessage)
@@ -752,6 +807,15 @@ func (h *Handler) Responses(c *gin.Context) {
 					TotalTokens:      estOutputTokens,
 				}
 			}
+		}
+		if isStream && outcome.logStatusCode != http.StatusOK && !wroteAnyBytes {
+			c.JSON(http.StatusBadGateway, gin.H{
+				"error": gin.H{
+					"message": "上游流在首包前中断: " + outcome.failureMessage,
+					"type":    "upstream_error",
+					"code":    "upstream_stream_break",
+				},
+			})
 		}
 		if !isStream {
 			if responseJSON != nil {
@@ -984,7 +1048,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		deltaCharCount := 0  // 累计 delta 字符数（用于断流时估算 token）
 		var readErr error
 		var writeErr error
-		wroteAnyBody := false
+		wroteAnyBytes := false
+		wroteVisibleBody := false
+		pendingFrames := make([]string, 0, 8)
 		var compactResult []byte
 
 		chunkID := "chatcmpl-" + uuid.New().String()[:8]
@@ -1006,11 +1072,23 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				h.store.Release(account)
 				return
 			}
+			// 先发一个 SSE 注释帧，避免前置代理/网关等待首包超时（如 524）。
+			if _, err := fmt.Fprint(c.Writer, ": keep-alive\n\n"); err != nil {
+				c.JSON(http.StatusBadGateway, gin.H{
+					"error": gin.H{"message": "下游连接写入失败", "type": "upstream_error"},
+				})
+				resp.Body.Close()
+				h.store.Release(account)
+				return
+			}
+			wroteAnyBytes = true
+			flusher.Flush()
 
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
 				chunk, done := streamTranslator.Translate(data)
 
 				eventType := gjson.GetBytes(data, "type").String()
+				visibleEvent := isUserVisibleDeltaEvent(eventType, data)
 				if !ttftRecorded && strings.Contains(eventType, ".delta") {
 					firstTokenMs = int(time.Since(start).Milliseconds())
 					ttftRecorded = true
@@ -1033,19 +1111,56 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 
 				if chunk != nil {
 					chunk, _ = sjson.SetBytes(chunk, "created", created)
-					if _, err := fmt.Fprintf(c.Writer, "data: %s\n\n", chunk); err != nil {
-						writeErr = err
-						return false
+					frame := fmt.Sprintf("data: %s\n\n", chunk)
+					if !wroteVisibleBody {
+						// 首个可见正文前先缓冲，若上游在此阶段断流可透明重试。
+						if !visibleEvent && !done {
+							pendingFrames = append(pendingFrames, frame)
+						} else {
+							for _, pending := range pendingFrames {
+								if _, err := fmt.Fprint(c.Writer, pending); err != nil {
+									writeErr = err
+									return false
+								}
+							}
+							pendingFrames = pendingFrames[:0]
+							if _, err := fmt.Fprint(c.Writer, frame); err != nil {
+								writeErr = err
+								return false
+							}
+							wroteAnyBytes = true
+							if visibleEvent {
+								wroteVisibleBody = true
+							}
+							flusher.Flush()
+						}
+					} else {
+						if _, err := fmt.Fprint(c.Writer, frame); err != nil {
+							writeErr = err
+							return false
+						}
+						wroteAnyBytes = true
+						if visibleEvent {
+							wroteVisibleBody = true
+						}
+						flusher.Flush()
 					}
-					wroteAnyBody = true
-					flusher.Flush()
 				}
 				if done {
-					if _, err := fmt.Fprintf(c.Writer, "data: [DONE]\n\n"); err != nil {
+					if !wroteVisibleBody {
+						for _, pending := range pendingFrames {
+							if _, err := fmt.Fprint(c.Writer, pending); err != nil {
+								writeErr = err
+								return false
+							}
+						}
+						pendingFrames = pendingFrames[:0]
+					}
+					if _, err := fmt.Fprint(c.Writer, "data: [DONE]\n\n"); err != nil {
 						writeErr = err
 						return false
 					}
-					wroteAnyBody = true
+					wroteAnyBytes = true
 					flusher.Flush()
 					return false
 				}
@@ -1125,13 +1240,14 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		// 断流检测 + token 估算
 		totalDuration := int(time.Since(start).Milliseconds())
 		outcome := classifyStreamOutcome(c.Request.Context().Err(), readErr, writeErr, gotTerminal)
-		if shouldTransparentRetryStream(outcome, attempt, maxRetries, wroteAnyBody, c.Request.Context().Err(), writeErr) {
+		if shouldTransparentRetryStream(outcome, attempt, maxRetries, wroteVisibleBody, c.Request.Context().Err(), writeErr) {
 			log.Printf("上游流在首包前断开，重置连接并重试 (attempt %d/%d, account %d, /v1/chat/completions): %s", attempt+1, maxRetries+1, account.ID(), outcome.failureMessage)
 			recyclePooledClientForAccount(account)
 			h.persistUsageAndSettleFromResponse(account, resp)
 			h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
 			resp.Body.Close()
 			h.store.Release(account)
+			excludeAccounts[account.ID()] = true
 			lastErr = readErr
 			if lastErr == nil {
 				lastErr = errors.New(outcome.failureMessage)
@@ -1152,6 +1268,15 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 					TotalTokens:      estOutputTokens,
 				}
 			}
+		}
+		if isStream && outcome.logStatusCode != http.StatusOK && !wroteAnyBytes {
+			c.JSON(http.StatusBadGateway, gin.H{
+				"error": gin.H{
+					"message": "上游流在首包前中断: " + outcome.failureMessage,
+					"type":    "upstream_error",
+					"code":    "upstream_stream_break",
+				},
+			})
 		}
 		if !isStream {
 			if compactResult != nil {

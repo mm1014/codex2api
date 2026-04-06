@@ -140,3 +140,52 @@ func TestShouldTransparentRetryStream(t *testing.T) {
 		t.Fatal("expected retry to stop when downstream context is canceled")
 	}
 }
+
+func TestIsUserVisibleDeltaEvent(t *testing.T) {
+	tests := []struct {
+		name      string
+		eventType string
+		payload   string
+		want      bool
+	}{
+		{
+			name:      "non delta event is not visible",
+			eventType: "response.created",
+			payload:   `{"type":"response.created"}`,
+			want:      false,
+		},
+		{
+			name:      "empty delta is not visible",
+			eventType: "response.output_text.delta",
+			payload:   `{"type":"response.output_text.delta","delta":""}`,
+			want:      false,
+		},
+		{
+			name:      "non-empty text delta is visible",
+			eventType: "response.output_text.delta",
+			payload:   `{"type":"response.output_text.delta","delta":"hello"}`,
+			want:      true,
+		},
+		{
+			name:      "object delta is visible",
+			eventType: "response.function_call_arguments.delta",
+			payload:   `{"type":"response.function_call_arguments.delta","delta":{"a":1}}`,
+			want:      true,
+		},
+		{
+			name:      "delta field missing defaults visible",
+			eventType: "response.reasoning.delta",
+			payload:   `{"type":"response.reasoning.delta"}`,
+			want:      true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isUserVisibleDeltaEvent(tc.eventType, []byte(tc.payload))
+			if got != tc.want {
+				t.Fatalf("isUserVisibleDeltaEvent() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
