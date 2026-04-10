@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/codex2api/logutil"
 	"github.com/codex2api/security"
 )
 
@@ -20,19 +21,17 @@ type fileLogger struct {
 }
 
 var (
-	badRequestLogger = &fileLogger{path: "bad_request.log"}  // 400 错误
+	badRequestLogger  = &fileLogger{path: "bad_request.log"}  // 400 错误
 	serverErrorLogger = &fileLogger{path: "server_error.log"} // 5xx 错误
 )
 
-const logDir = "logs"
-
 func (fl *fileLogger) init() *log.Logger {
 	fl.once.Do(func() {
-		if err := os.MkdirAll(logDir, 0o755); err != nil {
+		if err := os.MkdirAll(logutil.DefaultDir, 0o755); err != nil {
 			log.Printf("创建日志目录失败: %v", err)
 			return
 		}
-		f, err := os.OpenFile(filepath.Join(logDir, fl.path), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		f, err := os.OpenFile(filepath.Join(logutil.DefaultDir, fl.path), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 		if err != nil {
 			log.Printf("打开日志文件 %s 失败: %v", fl.path, err)
 			return

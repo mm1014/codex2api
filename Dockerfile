@@ -42,6 +42,8 @@ FROM alpine:3.19
 
 RUN apk --no-cache add ca-certificates tzdata
 
+WORKDIR /app
+
 COPY --from=go-builder /codex2api /usr/local/bin/codex2api
 
 EXPOSE 8080

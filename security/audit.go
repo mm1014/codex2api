@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/codex2api/logutil"
 )
 
 // AuditLogger 安全审计日志记录器
@@ -26,7 +28,7 @@ var (
 // GetAuditLogger 获取默认审计日志记录器
 func GetAuditLogger() *AuditLogger {
 	auditOnce.Do(func() {
-		defaultAuditLogger = NewAuditLogger("logs/security", "audit.log", 100*1024*1024, 10)
+		defaultAuditLogger = NewAuditLogger(filepath.Join(logutil.DefaultDir, "security"), "audit.log", 100*1024*1024, 10)
 	})
 	return defaultAuditLogger
 }

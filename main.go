@@ -19,6 +19,7 @@ import (
 	"github.com/codex2api/cache"
 	"github.com/codex2api/config"
 	"github.com/codex2api/database"
+	"github.com/codex2api/logutil"
 	"github.com/codex2api/proxy"
 	"github.com/codex2api/proxy/wsrelay"
 	"github.com/codex2api/security"
@@ -29,7 +30,18 @@ import (
 var frontendFS embed.FS
 
 func main() {
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	appLogFile, err := logutil.ConfigureStandardLogger(os.Stdout, logutil.DefaultDir)
+	if err != nil {
+		log.SetFlags(log.LstdFlags | log.Lshortfile)
+		log.SetOutput(os.Stdout)
+		log.Printf("初始化文件日志失败，将仅输出到控制台: %v", err)
+	} else {
+		defer func() {
+			if err := appLogFile.Close(); err != nil {
+				fmt.Fprintf(os.Stderr, "关闭应用日志文件失败: %v\n", err)
+			}
+		}()
+	}
 	log.Println("Codex2API v2 启动中...")
 
 	// 1. 加载配置 (.env)
