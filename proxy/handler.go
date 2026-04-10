@@ -457,6 +457,10 @@ func (h *Handler) acquireAccountForRequest(c *gin.Context, exclude map[int64]boo
 
 	logSlowAcquire := func(acc *auth.Account) {
 		elapsed := time.Since(startedAt)
+		if c != nil {
+			c.Set("x-scheduler-acquire-ms", elapsed.Milliseconds())
+			c.Set("x-scheduler-wait-rounds", waitRounds)
+		}
 		if elapsed < 200*time.Millisecond {
 			return
 		}
@@ -496,6 +500,10 @@ func (h *Handler) acquireAccountForRequest(c *gin.Context, exclude map[int64]boo
 		waitRounds++
 		acc := h.store.WaitForAvailableMatching(c.Request.Context(), waitFor, exclude, matcher)
 		if acc == nil {
+			if c != nil {
+				c.Set("x-scheduler-acquire-ms", time.Since(startedAt).Milliseconds())
+				c.Set("x-scheduler-wait-rounds", waitRounds)
+			}
 			continue
 		}
 		logSlowAcquire(acc)
@@ -728,6 +736,7 @@ func (h *Handler) Responses(c *gin.Context) {
 	var lastErr error
 	var lastStatusCode int
 	var lastBody []byte
+	var failedAttempts []string
 	excludeAccounts := make(map[int64]bool) // 重试时排除已失败的账号
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
@@ -792,6 +801,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			excludeAccounts[account.ID()] = true
 
 			log.Printf("上游返回错误 (attempt %d, status %d): %s", attempt+1, resp.StatusCode, string(errBody))
+			failedAttempts = append(failedAttempts, strconv.Itoa(resp.StatusCode))
 			logUpstreamError("/v1/responses", resp.StatusCode, model, account.ID(), errBody)
 			h.logUsage(&database.UsageLogInput{
 				AccountID:        account.ID(),
@@ -822,6 +832,13 @@ func (h *Handler) Responses(c *gin.Context) {
 		}
 
 		// 成功！透传响应并跟踪 TTFT / usage
+		if attempt > 0 {
+			c.Set("x-upstream-attempts", attempt+1)
+			c.Set("x-upstream-failed-attempts", strings.Join(failedAttempts, ","))
+			log.Printf("请求重试成功: endpoint=/v1/responses attempts=%d failed=%s account=%d", attempt+1, strings.Join(failedAttempts, ","), account.ID())
+		} else {
+			c.Set("x-upstream-attempts", 1)
+		}
 		account.Mu().RLock()
 		c.Set("x-account-email", account.Email)
 		account.Mu().RUnlock()
@@ -1127,6 +1144,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	var lastErr error
 	var lastStatusCode int
 	var lastBody []byte
+	var failedAttempts []string
 	excludeAccounts := make(map[int64]bool) // 重试时排除已失败的账号
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
@@ -1191,6 +1209,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			excludeAccounts[account.ID()] = true
 
 			log.Printf("上游返回错误 (attempt %d, status %d): %s", attempt+1, resp.StatusCode, string(errBody))
+			failedAttempts = append(failedAttempts, strconv.Itoa(resp.StatusCode))
 			logUpstreamError("/v1/chat/completions", resp.StatusCode, model, account.ID(), errBody)
 			h.logUsage(&database.UsageLogInput{
 				AccountID:        account.ID(),
@@ -1221,6 +1240,13 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		}
 
 		// 成功！翻译响应 + TTFT 跟踪
+		if attempt > 0 {
+			c.Set("x-upstream-attempts", attempt+1)
+			c.Set("x-upstream-failed-attempts", strings.Join(failedAttempts, ","))
+			log.Printf("请求重试成功: endpoint=/v1/chat/completions attempts=%d failed=%s account=%d", attempt+1, strings.Join(failedAttempts, ","), account.ID())
+		} else {
+			c.Set("x-upstream-attempts", 1)
+		}
 		account.Mu().RLock()
 		c.Set("x-account-email", account.Email)
 		account.Mu().RUnlock()

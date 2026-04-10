@@ -322,6 +322,10 @@ func loggerMiddleware() gin.HandlerFunc {
 		modelVal, _ := c.Get("x-model")
 		effortVal, _ := c.Get("x-reasoning-effort")
 		tierVal, _ := c.Get("x-service-tier")
+		attemptsVal, _ := c.Get("x-upstream-attempts")
+		failedAttemptsVal, _ := c.Get("x-upstream-failed-attempts")
+		schedulerAcquireVal, _ := c.Get("x-scheduler-acquire-ms")
+		schedulerWaitRoundsVal, _ := c.Get("x-scheduler-wait-rounds")
 
 		emailStr := ""
 		if e, ok := email.(string); ok && e != "" {
@@ -343,6 +347,18 @@ func loggerMiddleware() gin.HandlerFunc {
 		}
 		if t, ok := tierVal.(string); ok && t == "fast" {
 			tags = append(tags, "fast")
+		}
+		if attempts, ok := attemptsVal.(int); ok && attempts > 1 {
+			tags = append(tags, fmt.Sprintf("attempts=%d", attempts))
+		}
+		if failed, ok := failedAttemptsVal.(string); ok && failed != "" {
+			tags = append(tags, "failed="+security.SanitizeLog(failed))
+		}
+		if acquireMs, ok := schedulerAcquireVal.(int64); ok && acquireMs >= 20 {
+			tags = append(tags, fmt.Sprintf("sched=%dms", acquireMs))
+		}
+		if waitRounds, ok := schedulerWaitRoundsVal.(int); ok && waitRounds > 0 {
+			tags = append(tags, fmt.Sprintf("wait=%d", waitRounds))
 		}
 		tagStr := ""
 		if len(tags) > 0 {
