@@ -202,6 +202,7 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS public_api_key_id BIGINT NULL;
 
 	CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts(status);
+	CREATE INDEX IF NOT EXISTS idx_accounts_status_id ON accounts(status, id);
 	CREATE INDEX IF NOT EXISTS idx_accounts_platform ON accounts(platform);
 	CREATE INDEX IF NOT EXISTS idx_accounts_cooldown_until ON accounts(cooldown_until);
 	CREATE INDEX IF NOT EXISTS idx_accounts_public_api_key_id ON accounts(public_api_key_id);
@@ -1639,6 +1640,135 @@ func (db *DB) ListActive(ctx context.Context) ([]*AccountRow, error) {
 		accounts = append(accounts, a)
 	}
 	return accounts, rows.Err()
+}
+
+// ListActiveForAdmin 分段获取账号列表（管理页专用）。
+// 根因优化：避免一次性扫描完整 credentials（含大 token 字段）导致超时。
+func (db *DB) ListActiveForAdmin(ctx context.Context) ([]*AccountRow, error) {
+	const chunkSize = 500
+
+	pgQuery := `
+		SELECT a.id, a.name, a.platform, a.type,
+		       jsonb_build_object(
+		         'email', COALESCE(a.credentials->>'email', ''),
+		         'plan_type', COALESCE(a.credentials->>'plan_type', ''),
+		         'codex_7d_used_percent', COALESCE(a.credentials->>'codex_7d_used_percent', ''),
+		         'codex_5h_used_percent', COALESCE(a.credentials->>'codex_5h_used_percent', ''),
+		         'codex_5h_reset_at', COALESCE(a.credentials->>'codex_5h_reset_at', ''),
+		         'codex_7d_reset_at', COALESCE(a.credentials->>'codex_7d_reset_at', ''),
+		         'refresh_token_present', CASE WHEN COALESCE(a.credentials->>'refresh_token', '') <> '' THEN '1' ELSE '' END,
+		         'access_token_present', CASE WHEN COALESCE(a.credentials->>'access_token', '') <> '' THEN '1' ELSE '' END
+		       ) AS credentials,
+		       a.proxy_url,
+		       a.public_api_key_id,
+		       COALESCE(s.settled_amount_usd, 0) AS settled_amount_usd,
+		       a.status, a.cooldown_reason, a.cooldown_until,
+		       COALESCE(a.error_message, '') AS error_message,
+		       a.created_at, a.updated_at
+		FROM accounts a
+		LEFT JOIN public_account_settlements s ON s.account_id = a.id
+		WHERE a.status = 'active' AND a.id > $1
+		ORDER BY a.id
+		LIMIT $2
+	`
+
+	sqliteQuery := `
+		SELECT a.id, a.name, a.platform, a.type,
+		       json_object(
+		         'email', COALESCE(json_extract(a.credentials, '$.email'), ''),
+		         'plan_type', COALESCE(json_extract(a.credentials, '$.plan_type'), ''),
+		         'codex_7d_used_percent', COALESCE(json_extract(a.credentials, '$.codex_7d_used_percent'), ''),
+		         'codex_5h_used_percent', COALESCE(json_extract(a.credentials, '$.codex_5h_used_percent'), ''),
+		         'codex_5h_reset_at', COALESCE(json_extract(a.credentials, '$.codex_5h_reset_at'), ''),
+		         'codex_7d_reset_at', COALESCE(json_extract(a.credentials, '$.codex_7d_reset_at'), ''),
+		         'refresh_token_present', CASE WHEN COALESCE(json_extract(a.credentials, '$.refresh_token'), '') <> '' THEN '1' ELSE '' END,
+		         'access_token_present', CASE WHEN COALESCE(json_extract(a.credentials, '$.access_token'), '') <> '' THEN '1' ELSE '' END
+		       ) AS credentials,
+		       a.proxy_url,
+		       a.public_api_key_id,
+		       COALESCE(s.settled_amount_usd, 0) AS settled_amount_usd,
+		       a.status, a.cooldown_reason, a.cooldown_until,
+		       COALESCE(a.error_message, '') AS error_message,
+		       a.created_at, a.updated_at
+		FROM accounts a
+		LEFT JOIN public_account_settlements s ON s.account_id = a.id
+		WHERE a.status = 'active' AND a.id > ?
+		ORDER BY a.id
+		LIMIT ?
+	`
+
+	var accounts []*AccountRow
+	lastID := int64(0)
+
+	for {
+		query := pgQuery
+		if db.isSQLite() {
+			query = sqliteQuery
+		}
+		rows, err := db.conn.QueryContext(ctx, query, lastID, chunkSize)
+		if err != nil {
+			return nil, fmt.Errorf("查询账号失败: %w", err)
+		}
+
+		batchCount := 0
+		for rows.Next() {
+			a := &AccountRow{}
+			var credRaw interface{}
+			var cooldownUntilRaw interface{}
+			var createdAtRaw interface{}
+			var updatedAtRaw interface{}
+			if err := rows.Scan(
+				&a.ID,
+				&a.Name,
+				&a.Platform,
+				&a.Type,
+				&credRaw,
+				&a.ProxyURL,
+				&a.PublicAPIKeyID,
+				&a.SettledAmount,
+				&a.Status,
+				&a.CooldownReason,
+				&cooldownUntilRaw,
+				&a.ErrorMessage,
+				&createdAtRaw,
+				&updatedAtRaw,
+			); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("扫描账号行失败: %w", err)
+			}
+			a.Credentials = decodeCredentials(credRaw)
+			a.CooldownUntil, err = parseDBNullTimeValue(cooldownUntilRaw)
+			if err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("解析 cooldown_until 失败: %w", err)
+			}
+			a.CreatedAt, err = parseDBTimeValue(createdAtRaw)
+			if err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("解析 created_at 失败: %w", err)
+			}
+			a.UpdatedAt, err = parseDBTimeValue(updatedAtRaw)
+			if err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("解析 updated_at 失败: %w", err)
+			}
+
+			lastID = a.ID
+			batchCount++
+			accounts = append(accounts, a)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("扫描账号行失败: %w", err)
+		}
+		rows.Close()
+
+		if batchCount < chunkSize {
+			break
+		}
+	}
+
+	return accounts, nil
 }
 
 // ListAll 获取全部账号（包含 error 状态）

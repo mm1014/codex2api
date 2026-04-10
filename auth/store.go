@@ -2704,7 +2704,6 @@ func (s *Store) refreshAccount(ctx context.Context, acc *Account) error {
 	if info != nil {
 		acc.AccountID = info.ChatGPTAccountID
 		acc.Email = info.Email
-		acc.PlanType = NormalizePlanType(info.PlanType)
 	}
 	if activeCooldown {
 		acc.Status = StatusCooldown
@@ -2735,7 +2734,6 @@ func (s *Store) refreshAccount(ctx context.Context, acc *Account) error {
 	if info != nil {
 		credentials["account_id"] = info.ChatGPTAccountID
 		credentials["email"] = info.Email
-		credentials["plan_type"] = NormalizePlanType(info.PlanType)
 	}
 	if err := s.db.UpdateCredentials(ctx, dbID, credentials); err != nil {
 		log.Printf("[账号 %d] 更新数据库失败: %v", dbID, err)

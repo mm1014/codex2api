@@ -229,6 +229,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 
 	indexStatements := []string{
 		`CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts(status);`,
+		`CREATE INDEX IF NOT EXISTS idx_accounts_status_id ON accounts(status, id);`,
 		`CREATE INDEX IF NOT EXISTS idx_accounts_platform ON accounts(platform);`,
 		`CREATE INDEX IF NOT EXISTS idx_accounts_cooldown_until ON accounts(cooldown_until);`,
 		`CREATE INDEX IF NOT EXISTS idx_accounts_public_api_key_id ON accounts(public_api_key_id);`,
