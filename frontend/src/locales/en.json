@@ -284,6 +284,7 @@
     "importFailed": "Import failed",
     "importFailedWithReason": "Import failed: {{error}}",
     "importCompleted": "Import completed",
+    "importSummary": "Import result: added {{success}}, duplicates {{duplicate}}, failed {{failed}}",
     "deleteTitle": "Delete Account",
     "deleteDesc": "Account {{account}} will be removed from the current pool. This usually cannot be undone.",
     "deleteConfirm": "Confirm Delete",

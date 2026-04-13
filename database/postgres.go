@@ -2086,7 +2086,7 @@ func (db *DB) CountAll(ctx context.Context) (int, error) {
 
 // GetAllRefreshTokens 获取所有已存在的 refresh_token（用于导入去重）
 func (db *DB) GetAllRefreshTokens(ctx context.Context) (map[string]bool, error) {
-	rows, err := db.conn.QueryContext(ctx, `SELECT credentials FROM accounts`)
+	rows, err := db.conn.QueryContext(ctx, `SELECT credentials FROM accounts WHERE status = 'active'`)
 	if err != nil {
 		return nil, err
 	}
@@ -2125,7 +2125,7 @@ func (db *DB) InsertATAccount(ctx context.Context, name string, accessToken stri
 
 // GetAllAccessTokens 获取所有已存在的 access_token（用于 AT 导入去重）
 func (db *DB) GetAllAccessTokens(ctx context.Context) (map[string]bool, error) {
-	rows, err := db.conn.QueryContext(ctx, `SELECT credentials FROM accounts`)
+	rows, err := db.conn.QueryContext(ctx, `SELECT credentials FROM accounts WHERE status = 'active'`)
 	if err != nil {
 		return nil, err
 	}

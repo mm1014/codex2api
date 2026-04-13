@@ -8,6 +8,8 @@ codex2api
 
 # Go
 /vendor/
+.cache/
+.gocache/
 
 # Frontend
 frontend/node_modules/

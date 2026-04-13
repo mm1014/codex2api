@@ -284,6 +284,7 @@
     "importFailed": "导入失败",
     "importFailedWithReason": "导入失败：{{error}}",
     "importCompleted": "导入完成",
+    "importSummary": "导入结果：新增 {{success}}，重复 {{duplicate}}，失败 {{failed}}",
     "deleteTitle": "删除账号",
     "deleteDesc": "账号 {{account}} 将从当前账号池中移除。该操作通常不可恢复。",
     "deleteConfirm": "确认删除",

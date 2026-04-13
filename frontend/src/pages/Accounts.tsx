@@ -558,6 +558,69 @@ export default function Accounts() {
     }
   }
 
+  type ImportResult = {
+    message?: string
+    success?: number
+    duplicate?: number
+    failed?: number
+    error?: string
+  }
+
+  const toImportNumber = (value: unknown): number => {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value
+    }
+    if (typeof value === 'string') {
+      const parsed = Number(value)
+      if (Number.isFinite(parsed)) {
+        return parsed
+      }
+    }
+    return 0
+  }
+
+  const getImportResultMessage = (body: ImportResult) => {
+    if (body.message?.trim()) {
+      return body.message
+    }
+    const success = toImportNumber(body.success)
+    const duplicate = toImportNumber(body.duplicate)
+    const failed = toImportNumber(body.failed)
+    if (success || duplicate || failed) {
+      return t('accounts.importSummary', { success, duplicate, failed })
+    }
+    return t('accounts.importCompleted')
+  }
+
+  const handleImportResponse = async (res: Response) => {
+    const contentType = res.headers.get('content-type') ?? ''
+    if (contentType.includes('text/event-stream')) {
+      await readImportSSE(res)
+      return
+    }
+
+    let body: ImportResult
+    try {
+      body = await res.json()
+    } catch {
+      showToast(t('accounts.importFailed'), 'error')
+      return
+    }
+
+    if (!res.ok) {
+      showToast(
+        body.error ? t('accounts.importFailedWithReason', { error: body.error }) : t('accounts.importFailed'),
+        'error',
+      )
+      return
+    }
+
+    showToast(getImportResultMessage(body))
+    if (toImportNumber(body.success) > 0) {
+      void reload()
+    }
+  }
+
   const handleFileImport = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     if (!file) return
@@ -571,17 +634,7 @@ export default function Accounts() {
       const formData = new FormData()
       formData.append('file', file)
       const res = await fetch('/api/admin/accounts/import', { method: 'POST', body: formData, headers: getAdminKey() ? { 'X-Admin-Key': getAdminKey() } : {} })
-      if (res.headers.get('content-type')?.includes('text/event-stream')) {
-        await readImportSSE(res)
-      } else {
-        const data = await res.json()
-        if (!res.ok) {
-          showToast(data.error ? t('accounts.importFailedWithReason', { error: data.error }) : t('accounts.importFailed'), 'error')
-        } else {
-          showToast(t('accounts.importCompleted'))
-          void reload()
-        }
-      }
+      await handleImportResponse(res)
     } catch (error) {
       showToast(t('accounts.importFailedWithReason', { error: getErrorMessage(error) }), 'error')
     } finally {
@@ -602,17 +655,7 @@ export default function Accounts() {
         formData.append('file', files[i])
       }
       const res = await fetch('/api/admin/accounts/import', { method: 'POST', body: formData, headers: getAdminKey() ? { 'X-Admin-Key': getAdminKey() } : {} })
-      if (res.headers.get('content-type')?.includes('text/event-stream')) {
-        await readImportSSE(res)
-      } else {
-        const data = await res.json()
-        if (!res.ok) {
-          showToast(data.error ? t('accounts.importFailedWithReason', { error: data.error }) : t('accounts.importFailed'), 'error')
-        } else {
-          showToast(t('accounts.importCompleted'))
-          void reload()
-        }
-      }
+      await handleImportResponse(res)
     } catch (error) {
       showToast(t('accounts.importFailedWithReason', { error: getErrorMessage(error) }), 'error')
     } finally {
@@ -635,17 +678,7 @@ export default function Accounts() {
       formData.append('file', file)
       formData.append('format', 'at_txt')
       const res = await fetch('/api/admin/accounts/import', { method: 'POST', body: formData, headers: getAdminKey() ? { 'X-Admin-Key': getAdminKey() } : {} })
-      if (res.headers.get('content-type')?.includes('text/event-stream')) {
-        await readImportSSE(res)
-      } else {
-        const data = await res.json()
-        if (!res.ok) {
-          showToast(data.error ? t('accounts.importFailedWithReason', { error: data.error }) : t('accounts.importFailed'), 'error')
-        } else {
-          showToast(t('accounts.importCompleted'))
-          void reload()
-        }
-      }
+      await handleImportResponse(res)
     } catch (error) {
       showToast(t('accounts.importFailedWithReason', { error: getErrorMessage(error) }), 'error')
     } finally {
