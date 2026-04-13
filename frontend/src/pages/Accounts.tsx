@@ -142,15 +142,32 @@ function calcWeightedUsed(accounts: AccountRow[], rates: QuotaRateConfig, usageK
   }, 0)
 }
 
+function isUsageFull(value?: number | null): boolean {
+  if (value === null || value === undefined) return false
+  if (!Number.isFinite(value)) return false
+  return value >= 100
+}
+
 function calcWaitCount(accounts: AccountRow[], waitType: '5h' | '7d'): number {
   return accounts.filter((account) => {
     if (!account.wait_mode) return false
     const waitReason = (account.wait_reason || '').toLowerCase()
     const status = (account.status || '').toLowerCase()
+    const isFullUsageWait = waitReason === 'full_usage' || status === 'full_usage'
+    const isRateLimitedWait = waitReason === 'rate_limited' || status === 'rate_limited'
+    const isFull5h = isUsageFull(account.usage_percent_5h)
+    const isFull7d = isUsageFull(account.usage_percent_7d)
     if (waitType === '5h') {
-      return waitReason === 'rate_limited' || status === 'rate_limited'
+      if (isRateLimitedWait) return true
+      if (isFullUsageWait) {
+        return isFull5h && !isFull7d
+      }
+      return false
     }
-    return waitReason === 'full_usage' || status === 'full_usage'
+    if (isFullUsageWait) {
+      return isFull7d
+    }
+    return false
   }).length
 }
 
