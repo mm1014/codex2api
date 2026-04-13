@@ -5,9 +5,77 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/codex2api/auth"
 	"github.com/gin-gonic/gin"
 )
+
+func TestParseUpstreamErrorBrief_FallsBackToDetail(t *testing.T) {
+	code, message := parseUpstreamErrorBrief([]byte(`{"detail":{"code":"deactivated_workspace","message":"workspace disabled"}}`))
+	if code != "deactivated_workspace" {
+		t.Fatalf("code = %q, want %q", code, "deactivated_workspace")
+	}
+	if message != "workspace disabled" {
+		t.Fatalf("message = %q, want %q", message, "workspace disabled")
+	}
+}
+
+func TestIsRetryableStatus_DeactivatedWorkspace(t *testing.T) {
+	body := []byte(`{"detail":{"code":"deactivated_workspace"}}`)
+	if !isRetryableStatus(http.StatusPaymentRequired, body) {
+		t.Fatal("expected 402 deactivated_workspace to be retryable")
+	}
+	if isRetryableStatus(http.StatusPaymentRequired, []byte(`{"detail":{"code":"other"}}`)) {
+		t.Fatal("unexpected retryable result for unrelated 402 detail code")
+	}
+}
+
+func TestApplyCooldown_DeactivatedWorkspace(t *testing.T) {
+	store := auth.NewStore(nil, nil, nil)
+	handler := &Handler{store: store}
+	account := &auth.Account{
+		DBID:        1,
+		AccessToken: "at",
+		Status:      auth.StatusReady,
+	}
+
+	handler.applyCooldown(account, http.StatusPaymentRequired, []byte(`{"detail":{"code":"deactivated_workspace"}}`), nil)
+
+	if account.RuntimeStatus() != "unauthorized" {
+		t.Fatalf("runtime status = %q, want %q", account.RuntimeStatus(), "unauthorized")
+	}
+	statusCode, code, _ := account.GetLastFailureDetail()
+	if statusCode != http.StatusUnauthorized || code != "deactivated_workspace" {
+		t.Fatalf("last failure = (%d,%q), want (%d,%q)", statusCode, code, http.StatusUnauthorized, "deactivated_workspace")
+	}
+	until, reason, active := account.GetCooldownSnapshot()
+	if !active {
+		t.Fatal("expected cooldown to be active")
+	}
+	if reason != "unauthorized" {
+		t.Fatalf("cooldown reason = %q, want %q", reason, "unauthorized")
+	}
+	if time.Until(until) < 5*time.Minute {
+		t.Fatalf("cooldown too short: until=%s", until.Format(time.RFC3339))
+	}
+}
+
+func TestSendUpstreamError_NormalizesDeactivatedWorkspaceTo401(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+
+	handler := &Handler{}
+	body := []byte(`{"detail":{"code":"deactivated_workspace"}}`)
+
+	handler.sendUpstreamError(ctx, http.StatusPaymentRequired, body)
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusUnauthorized)
+	}
+}
 
 func TestSendFinalUpstreamError_UsageLimitRewrites429(t *testing.T) {
 	gin.SetMode(gin.TestMode)
