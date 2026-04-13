@@ -1534,6 +1534,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		} else {
 			var fullContent strings.Builder
 			var toolCalls []ToolCallResult
+			var lastResponseData []byte
 
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
 				eventType := gjson.GetBytes(data, "type").String()
@@ -1561,6 +1562,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 					}
 					// 从 response.output 提取 function_call 项
 					toolCalls = ExtractToolCallsFromOutput(data)
+					lastResponseData = data
 					gotTerminal = true
 					return false
 				case "response.failed":
@@ -1577,6 +1579,12 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			result, _ = sjson.SetBytes(result, "model", model)
 			result, _ = sjson.SetBytes(result, "choices.0.index", 0)
 			result, _ = sjson.SetBytes(result, "choices.0.message.role", "assistant")
+
+			if fullContent.Len() == 0 && len(toolCalls) == 0 && lastResponseData != nil {
+				if outputText := ExtractOutputTextFromOutput(lastResponseData); outputText != "" {
+					fullContent.WriteString(outputText)
+				}
+			}
 
 			if len(toolCalls) > 0 {
 				// 有工具调用: 设置 tool_calls 和对应的 finish_reason
