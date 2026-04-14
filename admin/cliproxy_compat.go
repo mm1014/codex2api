@@ -718,11 +718,7 @@ func (h *Handler) insertCompatAccount(ctx context.Context, name string, entry co
 				log.Printf("[cliproxy] 账号 %d 刷新失败: %v", accountID, err)
 				return
 			}
-			syncCtx, syncCancel := context.WithTimeout(context.Background(), 25*time.Second)
-			defer syncCancel()
-			if err := h.forceSyncPlanFromWhamUsageByID(syncCtx, accountID); err != nil {
-				log.Printf("[cliproxy] 账号 %d 套餐同步失败: %v", accountID, err)
-			}
+			h.triggerForcedPlanSync(accountID, "cliproxy_rt_upload")
 		}(id)
 	} else if entry.accessToken != "" {
 		h.triggerForcedPlanSync(id, "cliproxy_upload")
