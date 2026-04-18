@@ -1801,6 +1801,18 @@ func (s *Store) FindByID(dbID int64) *Account {
 	return nil
 }
 
+// UpdateAccountProxyURL 更新运行时账号的专属代理地址。
+func (s *Store) UpdateAccountProxyURL(dbID int64, proxyURL string) bool {
+	acc := s.FindByID(dbID)
+	if acc == nil {
+		return false
+	}
+	acc.mu.Lock()
+	acc.ProxyURL = proxyURL
+	acc.mu.Unlock()
+	return true
+}
+
 // MarkCooldown 标记账号进入冷却，并持久化到数据库
 func (s *Store) MarkCooldown(acc *Account, duration time.Duration, reason string) {
 	if acc == nil {

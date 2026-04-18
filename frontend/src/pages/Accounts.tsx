@@ -24,7 +24,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { Plus, RefreshCw, Trash2, Zap, FlaskConical, Ban, Timer, AlertTriangle, Upload, Download, ArrowDownToLine, KeyRound, ExternalLink, FileText, FileJson, BarChart3, Search, Fingerprint } from 'lucide-react'
+import { Plus, RefreshCw, Trash2, Zap, FlaskConical, Ban, Timer, AlertTriangle, Upload, Download, ArrowDownToLine, KeyRound, ExternalLink, FileText, FileJson, BarChart3, Search, Fingerprint, Pencil } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
 import AccountUsageModal from '../components/AccountUsageModal'
@@ -236,6 +236,9 @@ export default function Accounts() {
   const [cleaningRateLimited, setCleaningRateLimited] = useState(false)
   const [cleaningError, setCleaningError] = useState(false)
   const [testingAccount, setTestingAccount] = useState<AccountRow | null>(null)
+  const [editingProxyAccount, setEditingProxyAccount] = useState<AccountRow | null>(null)
+  const [editingProxyURL, setEditingProxyURL] = useState('')
+  const [savingProxy, setSavingProxy] = useState(false)
   const [authInfoLoadingIds, setAuthInfoLoadingIds] = useState<Set<number>>(new Set())
   const [quotaInfoLoadingIds, setQuotaInfoLoadingIds] = useState<Set<number>>(new Set())
   const [rawInfoDialog, setRawInfoDialog] = useState<{
@@ -767,6 +770,33 @@ export default function Accounts() {
       void reload()
     } catch (error) {
       showToast(t('accounts.deleteFailed', { error: getErrorMessage(error) }), 'error')
+    }
+  }
+
+  const handleOpenEditProxy = (account: AccountRow) => {
+    setEditingProxyAccount(account)
+    setEditingProxyURL(account.proxy_url || '')
+  }
+
+  const handleCloseEditProxy = () => {
+    setEditingProxyAccount(null)
+    setEditingProxyURL('')
+  }
+
+  const handleSaveProxy = async () => {
+    if (!editingProxyAccount) return
+    setSavingProxy(true)
+    try {
+      await api.updateAccount(editingProxyAccount.id, {
+        proxy_url: editingProxyURL.trim(),
+      })
+      showToast(t('accounts.updateProxySuccess'))
+      handleCloseEditProxy()
+      await reload()
+    } catch (error) {
+      showToast(t('accounts.updateProxyFailed', { error: getErrorMessage(error) }), 'error')
+    } finally {
+      setSavingProxy(false)
     }
   }
 
@@ -1348,6 +1378,15 @@ export default function Accounts() {
                               variant="outline"
                               size="icon"
                               className="h-7 w-8 px-0"
+                              onClick={() => handleOpenEditProxy(account)}
+                              title={t('accounts.editProxy')}
+                            >
+                              <Pencil className="size-3.5" />
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="icon"
+                              className="h-7 w-8 px-0"
                               onClick={() => setTestingAccount(account)}
                               title={t('accounts.testConnection')}
                             >
@@ -1595,6 +1634,37 @@ export default function Accounts() {
               )}
             </div>
           )}
+        </Modal>
+
+        <Modal
+          show={editingProxyAccount !== null}
+          title={t('accounts.editProxyTitle', {
+            account: editingProxyAccount?.email || `ID ${editingProxyAccount?.id ?? ''}`,
+          })}
+          onClose={handleCloseEditProxy}
+          footer={(
+            <>
+              <Button variant="outline" onClick={handleCloseEditProxy} disabled={savingProxy}>
+                {t('common.cancel')}
+              </Button>
+              <Button onClick={() => void handleSaveProxy()} disabled={savingProxy || editingProxyAccount === null}>
+                {savingProxy ? t('common.saving') : t('common.save')}
+              </Button>
+            </>
+          )}
+        >
+          <div className="space-y-3">
+            <p className="text-sm text-muted-foreground">{t('accounts.editProxyDesc')}</p>
+            <div>
+              <label className="block mb-2 text-sm font-semibold text-muted-foreground">{t('accounts.proxyUrl')}</label>
+              <Input
+                placeholder={t('accounts.proxyUrlPlaceholder')}
+                value={editingProxyURL}
+                onChange={(event: ChangeEvent<HTMLInputElement>) => setEditingProxyURL(event.target.value)}
+              />
+              <p className="mt-2 text-xs text-muted-foreground">{t('accounts.editProxyHint')}</p>
+            </div>
+          </div>
         </Modal>
 
         <Modal

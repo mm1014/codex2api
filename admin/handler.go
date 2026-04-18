@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -94,6 +95,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/accounts", h.AddAccount)
 	api.POST("/accounts/at", h.AddATAccount)
 	api.POST("/accounts/import", h.ImportAccounts)
+	api.PATCH("/accounts/:id", h.UpdateAccount)
 	api.DELETE("/accounts/:id", h.DeleteAccount)
 	api.POST("/accounts/:id/refresh", h.RefreshAccount)
 	api.GET("/accounts/:id/auth-info", h.GetAccountAuthInfo)
@@ -604,6 +606,10 @@ type addATAccountReq struct {
 	ProxyURL    string `json:"proxy_url"`
 }
 
+type updateAccountReq struct {
+	ProxyURL *string `json:"proxy_url"`
+}
+
 // AddATAccount 添加 AT-only 账号（支持批量：access_token 按行分割）
 func (h *Handler) AddATAccount(c *gin.Context) {
 	var req addATAccountReq
@@ -724,6 +730,65 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 		"message": msg,
 		"success": successCount,
 		"failed":  failCount,
+	})
+}
+
+// UpdateAccount 更新已有账号的可编辑字段（当前仅支持 proxy_url）。
+func (h *Handler) UpdateAccount(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeError(c, http.StatusBadRequest, "无效的账号 ID")
+		return
+	}
+
+	var req updateAccountReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	if req.ProxyURL == nil {
+		writeError(c, http.StatusBadRequest, "proxy_url 是必填字段")
+		return
+	}
+
+	proxyURL := strings.TrimSpace(security.SanitizeInput(*req.ProxyURL))
+	if err := security.ValidateProxyURL(proxyURL); err != nil {
+		writeError(c, http.StatusBadRequest, "代理URL无效")
+		return
+	}
+	if h.db == nil {
+		writeError(c, http.StatusInternalServerError, "数据库未初始化")
+		return
+	}
+	if h.store == nil {
+		writeError(c, http.StatusInternalServerError, "运行时号池未初始化")
+		return
+	}
+	if h.store.FindByID(id) == nil {
+		writeError(c, http.StatusConflict, fmt.Sprintf("账号 %d 未加载到运行时号池，请刷新或重启服务后重试", id))
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	defer cancel()
+
+	if err := h.db.UpdateAccountProxyURL(ctx, id, proxyURL); err != nil {
+		if err == sql.ErrNoRows {
+			writeError(c, http.StatusNotFound, fmt.Sprintf("账号 %d 不存在", id))
+			return
+		}
+		writeError(c, http.StatusInternalServerError, "更新账号代理失败: "+err.Error())
+		return
+	}
+
+	if !h.store.UpdateAccountProxyURL(id, proxyURL) {
+		writeError(c, http.StatusConflict, fmt.Sprintf("账号 %d 代理已持久化，但运行时同步失败，请刷新或重启服务后重试", id))
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":   "账号代理已更新",
+		"proxy_url": proxyURL,
 	})
 }
 

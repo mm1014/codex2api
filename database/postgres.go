@@ -1912,6 +1912,27 @@ func (db *DB) GetAccountByID(ctx context.Context, id int64) (*AccountRow, error)
 	return a, nil
 }
 
+// UpdateAccountProxyURL 更新账号专属代理地址。
+func (db *DB) UpdateAccountProxyURL(ctx context.Context, id int64, proxyURL string) error {
+	result, err := db.conn.ExecContext(
+		ctx,
+		`UPDATE accounts SET proxy_url = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+		proxyURL,
+		id,
+	)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 // UpdateCredentials 原子合并更新账号的 credentials（JSONB || 运算符，不覆盖已有字段）
 // 解决并发刷新时一个进程覆盖另一个进程写入的字段的问题
 func (db *DB) UpdateCredentials(ctx context.Context, id int64, credentials map[string]interface{}) error {

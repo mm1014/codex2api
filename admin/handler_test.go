@@ -1,13 +1,19 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 
+	"github.com/codex2api/auth"
+	"github.com/codex2api/cache"
+	"github.com/codex2api/database"
 	"github.com/gin-gonic/gin"
 )
 
@@ -135,5 +141,116 @@ func TestRefreshAccountReturnsRefreshFailure(t *testing.T) {
 	}
 	if got := payload["error"]; got != "刷新失败: upstream unavailable" {
 		t.Fatalf("error = %q, want %q", got, "刷新失败: upstream unavailable")
+	}
+}
+
+func TestUpdateAccountProxyRouteUpdatesPersistedAndInMemoryProxy(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := database.New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) returned error: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	accountID, err := db.InsertAccount(ctx, "sticky-proxy-account", "refresh-token", "http://127.0.0.1:7890")
+	if err != nil {
+		t.Fatalf("InsertAccount returned error: %v", err)
+	}
+
+	store := auth.NewStore(db, cache.NewMemory(8), &database.SystemSettings{})
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("store.Init returned error: %v", err)
+	}
+
+	handler := NewHandler(store, db, cache.NewMemory(8), nil, "")
+	router := gin.New()
+	handler.RegisterRoutes(router)
+
+	body := bytes.NewBufferString(`{"proxy_url":"http://Codex.acc_541:123@127.0.0.1:2260"}`)
+	req := httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/api/admin/accounts/%d", accountID), body)
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+
+	var payload map[string]string
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got := payload["message"]; got != "账号代理已更新" {
+		t.Fatalf("message = %q, want %q", got, "账号代理已更新")
+	}
+
+	rows, err := db.ListActive(ctx)
+	if err != nil {
+		t.Fatalf("ListActive returned error: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("active rows = %d, want 1", len(rows))
+	}
+	if got := rows[0].ProxyURL; got != "http://Codex.acc_541:123@127.0.0.1:2260" {
+		t.Fatalf("persisted proxy_url = %q, want %q", got, "http://Codex.acc_541:123@127.0.0.1:2260")
+	}
+
+	account := store.FindByID(accountID)
+	if account == nil {
+		t.Fatalf("store.FindByID(%d) returned nil", accountID)
+	}
+	account.Mu().RLock()
+	gotProxy := account.ProxyURL
+	account.Mu().RUnlock()
+	if gotProxy != "http://Codex.acc_541:123@127.0.0.1:2260" {
+		t.Fatalf("store proxy_url = %q, want %q", gotProxy, "http://Codex.acc_541:123@127.0.0.1:2260")
+	}
+}
+
+func TestUpdateAccountProxyRouteRejectsRuntimeStateMismatch(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := database.New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) returned error: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	accountID, err := db.InsertAccount(ctx, "runtime-mismatch-account", "refresh-token", "http://127.0.0.1:7890")
+	if err != nil {
+		t.Fatalf("InsertAccount returned error: %v", err)
+	}
+
+	store := auth.NewStore(db, cache.NewMemory(8), &database.SystemSettings{})
+	handler := NewHandler(store, db, cache.NewMemory(8), nil, "")
+	router := gin.New()
+	handler.RegisterRoutes(router)
+
+	body := bytes.NewBufferString(`{"proxy_url":"http://Codex.acc_999:123@127.0.0.1:2260"}`)
+	req := httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/api/admin/accounts/%d", accountID), body)
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d, body = %s", recorder.Code, http.StatusConflict, recorder.Body.String())
+	}
+
+	rows, err := db.ListActive(ctx)
+	if err != nil {
+		t.Fatalf("ListActive returned error: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("active rows = %d, want 1", len(rows))
+	}
+	if got := rows[0].ProxyURL; got != "http://127.0.0.1:7890" {
+		t.Fatalf("persisted proxy_url = %q, want %q", got, "http://127.0.0.1:7890")
 	}
 }

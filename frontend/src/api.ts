@@ -19,6 +19,7 @@ import type {
   StatsResponse,
   CPAExportEntry,
   SystemSettings,
+  UpdateAccountRequest,
   UsageLogsResponse,
   UsageLogsPagedResponse,
   UsageStats,
@@ -101,6 +102,8 @@ export const api = {
     request<CreateAccountResponse>('/accounts', { method: 'POST', body: JSON.stringify(data) }),
   addATAccount: (data: AddATAccountRequest) =>
     request<CreateAccountResponse>('/accounts/at', { method: 'POST', body: JSON.stringify(data) }),
+  updateAccount: (id: number, data: UpdateAccountRequest) =>
+    request<MessageResponse>(`/accounts/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteAccount: (id: number) =>
     request<MessageResponse>(`/accounts/${id}`, { method: 'DELETE' }),
   refreshAccount: (id: number) =>

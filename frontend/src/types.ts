@@ -78,6 +78,10 @@ export interface AddATAccountRequest {
   proxy_url: string
 }
 
+export interface UpdateAccountRequest {
+  proxy_url: string
+}
+
 export interface AccountModelStat {
   model: string
   requests: number
