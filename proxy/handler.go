@@ -1062,6 +1062,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		} else {
 			// 非流式收集
 			var lastResponseData []byte
+			var collectedOutputText strings.Builder
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
 				eventType := gjson.GetBytes(data, "type").String()
 				if !firstFrameRecorded {
@@ -1077,7 +1078,9 @@ func (h *Handler) Responses(c *gin.Context) {
 				}
 				// 累计 delta 字符数
 				if eventType == "response.output_text.delta" {
-					deltaCharCount += len(gjson.GetBytes(data, "delta").String())
+					delta := gjson.GetBytes(data, "delta").String()
+					collectedOutputText.WriteString(delta)
+					deltaCharCount += len(delta)
 				}
 				if eventType == "response.completed" {
 					usage = extractUsage(data)
@@ -1102,6 +1105,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				responseObj := gjson.GetBytes(lastResponseData, "response")
 				if responseObj.Exists() {
 					responseJSON = []byte(responseObj.Raw)
+					responseJSON = ensureResponseOutputFromDelta(responseJSON, collectedOutputText.String())
 				}
 			}
 		}
@@ -1534,6 +1538,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		} else {
 			var fullContent strings.Builder
 			var toolCalls []ToolCallResult
+			var lastResponseData []byte
 
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
 				eventType := gjson.GetBytes(data, "type").String()
@@ -1561,6 +1566,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 					}
 					// 从 response.output 提取 function_call 项
 					toolCalls = ExtractToolCallsFromOutput(data)
+					lastResponseData = data
 					gotTerminal = true
 					return false
 				case "response.failed":
@@ -1577,6 +1583,12 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			result, _ = sjson.SetBytes(result, "model", model)
 			result, _ = sjson.SetBytes(result, "choices.0.index", 0)
 			result, _ = sjson.SetBytes(result, "choices.0.message.role", "assistant")
+
+			if fullContent.Len() == 0 && len(toolCalls) == 0 && lastResponseData != nil {
+				if outputText := ExtractOutputTextFromOutput(lastResponseData); outputText != "" {
+					fullContent.WriteString(outputText)
+				}
+			}
 
 			if len(toolCalls) > 0 {
 				// 有工具调用: 设置 tool_calls 和对应的 finish_reason
@@ -2019,6 +2031,25 @@ func parseFloat(s string) float64 {
 	v := 0.0
 	fmt.Sscanf(s, "%f", &v)
 	return v
+}
+
+func ensureResponseOutputFromDelta(responseJSON []byte, collectedText string) []byte {
+	text := strings.TrimSpace(collectedText)
+	if len(responseJSON) == 0 || text == "" {
+		return responseJSON
+	}
+	output := gjson.GetBytes(responseJSON, "output")
+	if output.Exists() && output.IsArray() && len(output.Array()) > 0 {
+		return responseJSON
+	}
+
+	patched := responseJSON
+	patched, _ = sjson.SetBytes(patched, "output.0.type", "message")
+	patched, _ = sjson.SetBytes(patched, "output.0.role", "assistant")
+	patched, _ = sjson.SetBytes(patched, "output.0.status", "completed")
+	patched, _ = sjson.SetBytes(patched, "output.0.content.0.type", "output_text")
+	patched, _ = sjson.SetBytes(patched, "output.0.content.0.text", text)
+	return patched
 }
 
 // sendUpstreamError 发送上游错误响应给客户端
