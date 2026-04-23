@@ -365,18 +365,11 @@ func ExecuteRequestTraced(ctx context.Context, account *auth.Account, requestBod
 	return resp, trace, nil
 }
 
-// ResolveSessionID 从下游请求提取或生成 session ID
-// 优先级（参考 sub2api）：
-//  1. Header: session_id
-//  2. Header: conversation_id
-//  3. Body:   prompt_cache_key
-//  4. 基于 Bearer API Key 的确定性 UUID（参考 CLIProxyAPI）
-func ResolveSessionID(authHeader string, body []byte) string {
-	// 此函数由 handler 调用，将 gin.Context 的 header 传进来
-
-	// 优先从 body 的 prompt_cache_key 提取
-	if v := strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String()); v != "" {
-		return v
+// ResolveSessionID 从下游请求提取或生成 session ID。
+// 显式会话键优先生效；缺失时再回退到 API Key / 随机 UUID，供上游 continuity 使用。
+func ResolveSessionID(headers http.Header, authHeader string, body []byte) string {
+	if explicit := ResolveExplicitSessionKey(headers, body); explicit != "" {
+		return explicit
 	}
 
 	// 基于下游用户的 API Key 生成确定性 cache key（参考 CLIProxyAPI codex_executor.go:621）

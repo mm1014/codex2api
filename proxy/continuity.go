@@ -36,6 +36,30 @@ const (
 	SelectedAuthMetadataKey     = "selected_auth"
 )
 
+// ResolveExplicitSessionKey 只解析可用于 sticky_session 的显式会话键。
+// 优先级：
+// 1. Header: session_id
+// 2. Header: conversation_id
+// 3. Body: prompt_cache_key
+// 4. Body: execution_session
+func ResolveExplicitSessionKey(headers http.Header, body []byte) string {
+	if headers != nil {
+		if v := strings.TrimSpace(headers.Get("session_id")); v != "" {
+			return v
+		}
+		if v := strings.TrimSpace(headers.Get("conversation_id")); v != "" {
+			return v
+		}
+	}
+	if v := strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String()); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(gjson.GetBytes(body, "execution_session").String()); v != "" {
+		return v
+	}
+	return ""
+}
+
 // metadataString 从元数据中提取字符串值
 func metadataString(meta map[string]any, key string) string {
 	if len(meta) == 0 {

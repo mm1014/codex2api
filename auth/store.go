@@ -37,6 +37,12 @@ const (
 	AutoCleanFullUsageModeWait   = "wait"
 )
 
+const (
+	SchedulerModeBalanced      = "balanced"
+	SchedulerModeStickySession = "sticky_session"
+	stickySessionTTL           = 24 * time.Hour
+)
+
 // NormalizeAutoCleanFullUsageMode 规范化满用量处理模式
 func NormalizeAutoCleanFullUsageMode(mode string) string {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
@@ -46,6 +52,15 @@ func NormalizeAutoCleanFullUsageMode(mode string) string {
 		return AutoCleanFullUsageModeWait
 	default:
 		return AutoCleanFullUsageModeOff
+	}
+}
+
+func normalizeSchedulerMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case SchedulerModeStickySession:
+		return SchedulerModeStickySession
+	default:
+		return SchedulerModeBalanced
 	}
 }
 
@@ -829,6 +844,7 @@ type Store struct {
 	autoCleanupBatch        atomic.Bool
 	plusPortEnabled         atomic.Bool
 	plusPortAccessFree      atomic.Bool
+	schedulerMode           atomic.Value // string: balanced / sticky_session
 	preferredPlanType       atomic.Value // string: free/plus/pro/team/enterprise 或空
 	preferredPlanBonus      int64        // 指定套餐额外调度加分
 	maxRetries              int64        // 请求失败最大重试次数（换号重试）
@@ -849,7 +865,14 @@ type Store struct {
 	// 智能刷新调度器
 	refreshScheduler atomic.Pointer[RefreshSchedulerIntegration]
 
+	stickyMu             sync.Mutex
+	stickyBindings       map[string]stickyBinding
 	allowRemoteMigration atomic.Bool // 是否允许远程迁移拉取账号
+}
+
+type stickyBinding struct {
+	AccountID int64
+	ExpiresAt time.Time
 }
 
 // AccountMatcher 用于在调度阶段对账号做额外过滤。
@@ -937,6 +960,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 			TestConcurrency:        50,
 			TestModel:              "gpt-5.4",
 			ProxyURL:               "",
+			SchedulerMode:          SchedulerModeBalanced,
 			AutoCleanFullUsageMode: AutoCleanFullUsageModeOff,
 			PlusPortAccessFree:     true,
 		}
@@ -948,6 +972,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 		db:               db,
 		tokenCache:       tc,
 		stopCh:           make(chan struct{}),
+		stickyBindings:   make(map[string]stickyBinding),
 		proxyPoolEnabled: settings.ProxyPoolEnabled,
 	}
 	s.testModel.Store(settings.TestModel)
@@ -962,6 +987,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	s.autoCleanExpired.Store(settings.AutoCleanExpired)
 	s.plusPortEnabled.Store(settings.PlusPortEnabled)
 	s.plusPortAccessFree.Store(settings.PlusPortAccessFree)
+	s.schedulerMode.Store(normalizeSchedulerMode(settings.SchedulerMode))
 	s.preferredPlanType.Store(normalizePreferredPlanType(settings.SchedulerPreferredPlan))
 	atomic.StoreInt64(&s.preferredPlanBonus, int64(clampPreferredPlanBonus(settings.SchedulerPlanBonus)))
 	retries := int64(settings.MaxRetries)
@@ -1105,6 +1131,24 @@ func (s *Store) GetPlusPortAccessFree() bool {
 		return true
 	}
 	return s.plusPortAccessFree.Load()
+}
+
+// SetSchedulerMode 设置账号调度模式。
+func (s *Store) SetSchedulerMode(mode string) {
+	if s == nil {
+		return
+	}
+	s.schedulerMode.Store(normalizeSchedulerMode(mode))
+}
+
+// GetSchedulerMode 获取当前账号调度模式。
+func (s *Store) GetSchedulerMode() string {
+	if s == nil {
+		return SchedulerModeBalanced
+	}
+	v := s.schedulerMode.Load()
+	mode, _ := v.(string)
+	return normalizeSchedulerMode(mode)
 }
 
 // GetPreferredPlanType 获取指定套餐优先调度配置
@@ -1520,6 +1564,122 @@ func (s *Store) CleanByRuntimeStatus(ctx context.Context, targetStatus string) i
 
 // ==================== 最少连接调度 ====================
 
+func (s *Store) getStickyBinding(stickyKey string, now time.Time) (int64, bool) {
+	if s == nil || stickyKey == "" {
+		return 0, false
+	}
+	s.stickyMu.Lock()
+	defer s.stickyMu.Unlock()
+
+	if s.stickyBindings == nil {
+		return 0, false
+	}
+	binding, ok := s.stickyBindings[stickyKey]
+	if !ok {
+		return 0, false
+	}
+	if binding.AccountID == 0 || now.After(binding.ExpiresAt) {
+		delete(s.stickyBindings, stickyKey)
+		return 0, false
+	}
+	return binding.AccountID, true
+}
+
+func (s *Store) setStickyBinding(stickyKey string, accountID int64, now time.Time) {
+	if s == nil || stickyKey == "" || accountID == 0 {
+		return
+	}
+	s.stickyMu.Lock()
+	if s.stickyBindings == nil {
+		s.stickyBindings = make(map[string]stickyBinding)
+	}
+	s.stickyBindings[stickyKey] = stickyBinding{
+		AccountID: accountID,
+		ExpiresAt: now.Add(stickySessionTTL),
+	}
+	s.stickyMu.Unlock()
+}
+
+func (s *Store) clearStickyBinding(stickyKey string) {
+	if s == nil || stickyKey == "" {
+		return
+	}
+	s.stickyMu.Lock()
+	if s.stickyBindings == nil {
+		s.stickyMu.Unlock()
+		return
+	}
+	delete(s.stickyBindings, stickyKey)
+	s.stickyMu.Unlock()
+}
+
+func (s *Store) tryAcquireStickyAccount(accountID int64, exclude map[int64]bool, matcher AccountMatcher, now time.Time) *Account {
+	if s == nil || accountID == 0 {
+		return nil
+	}
+	if exclude != nil && exclude[accountID] {
+		return nil
+	}
+
+	acc := s.FindByID(accountID)
+	if acc == nil {
+		return nil
+	}
+	if matcher != nil && !matcher(acc) {
+		return nil
+	}
+
+	baseLimit := atomic.LoadInt64(&s.maxConcurrency)
+	if scheduler := s.getFastScheduler(); scheduler != nil {
+		_, _, limit, available := acc.fastSchedulerSnapshot(baseLimit, now)
+		if !available || limit <= 0 {
+			return nil
+		}
+		if !tryAcquireAccount(acc, limit) {
+			return nil
+		}
+		return acc
+	}
+
+	if !acc.IsAvailable() {
+		return nil
+	}
+	_, _, limit := acc.schedulerSnapshot(baseLimit)
+	if limit <= 0 {
+		return nil
+	}
+	if !tryAcquireAccount(acc, limit) {
+		return nil
+	}
+	return acc
+}
+
+// NextMatchingSticky 获取下一个可用账号，并在 sticky_session 模式下优先复用绑定账号。
+func (s *Store) NextMatchingSticky(exclude map[int64]bool, matcher AccountMatcher, stickyKey string) *Account {
+	if s == nil || s.GetSchedulerMode() != SchedulerModeStickySession || strings.TrimSpace(stickyKey) == "" {
+		return s.NextMatching(exclude, matcher)
+	}
+
+	now := time.Now()
+	stickyKey = strings.TrimSpace(stickyKey)
+	if accountID, ok := s.getStickyBinding(stickyKey, now); ok {
+		if acc := s.tryAcquireStickyAccount(accountID, exclude, matcher, now); acc != nil {
+			s.setStickyBinding(stickyKey, accountID, now)
+			return acc
+		}
+		acc := s.FindByID(accountID)
+		if acc == nil || (exclude != nil && exclude[accountID]) || (matcher != nil && !matcher(acc)) || !acc.IsAvailable() {
+			s.clearStickyBinding(stickyKey)
+		}
+	}
+
+	acc := s.NextMatching(exclude, matcher)
+	if acc != nil {
+		s.setStickyBinding(stickyKey, acc.DBID, now)
+	}
+	return acc
+}
+
 // Next 获取下一个可用账号（健康优先 + 低负载择优 + warm 公平调度）
 func (s *Store) Next() *Account {
 	return s.NextMatching(nil, nil)
@@ -1628,6 +1788,41 @@ func (s *Store) NextMatching(exclude map[int64]bool, matcher AccountMatcher) *Ac
 // WaitForAvailable 等待可用账号（带超时的请求排队）
 func (s *Store) WaitForAvailable(ctx context.Context, timeout time.Duration) *Account {
 	return s.WaitForAvailableMatching(ctx, timeout, nil, nil)
+}
+
+// WaitForAvailableMatchingSticky 等待满足过滤条件的可用账号，并在 sticky_session 模式下优先复用绑定账号。
+func (s *Store) WaitForAvailableMatchingSticky(ctx context.Context, timeout time.Duration, exclude map[int64]bool, matcher AccountMatcher, stickyKey string) *Account {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+
+	backoff := 50 * time.Millisecond
+	backoffTimer := time.NewTimer(backoff)
+	defer backoffTimer.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-deadline.C:
+			return nil
+		default:
+			acc := s.NextMatchingSticky(exclude, matcher, stickyKey)
+			if acc != nil {
+				return acc
+			}
+			backoffTimer.Reset(backoff)
+			select {
+			case <-backoffTimer.C:
+				if backoff < 500*time.Millisecond {
+					backoff *= 2
+				}
+			case <-ctx.Done():
+				return nil
+			case <-deadline.C:
+				return nil
+			}
+		}
+	}
 }
 
 // WaitForAvailableMatching 等待满足过滤条件的可用账号（带超时的请求排队）

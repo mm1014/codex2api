@@ -41,6 +41,10 @@ function normalizeFullUsageMode(mode: string | undefined, legacyEnabled: boolean
   return legacyEnabled ? 'delete' : 'off'
 }
 
+function normalizeSchedulerMode(mode: string | undefined): 'balanced' | 'sticky_session' {
+  return mode === 'sticky_session' ? 'sticky_session' : 'balanced'
+}
+
 export default function Settings() {
   const PUBLIC_KEYS_PAGE_SIZE = 10
   const { t } = useTranslation()
@@ -80,6 +84,7 @@ export default function Settings() {
     auto_clean_full_usage_mode: 'off',
     proxy_pool_enabled: false,
     fast_scheduler_enabled: false,
+    scheduler_mode: 'balanced',
     plus_port_enabled: false,
     plus_port_access_free: true,
     scheduler_preferred_plan: '',
@@ -118,6 +123,7 @@ export default function Settings() {
       auto_clean_full_usage: fullUsageMode !== 'off',
       plus_port_enabled: settings.plus_port_enabled ?? false,
       plus_port_access_free: settings.plus_port_access_free ?? true,
+      scheduler_mode: normalizeSchedulerMode(settings.scheduler_mode),
       scheduler_preferred_plan: settings.scheduler_preferred_plan ?? '',
       scheduler_plan_bonus: settings.scheduler_plan_bonus ?? 0,
       quota_rate_plus: settings.quota_rate_plus ?? 10,
@@ -291,6 +297,7 @@ export default function Settings() {
         auto_clean_full_usage: fullUsageMode !== 'off',
         plus_port_enabled: updated.plus_port_enabled ?? false,
         plus_port_access_free: updated.plus_port_access_free ?? true,
+        scheduler_mode: normalizeSchedulerMode(updated.scheduler_mode),
         scheduler_preferred_plan: updated.scheduler_preferred_plan ?? '',
         scheduler_plan_bonus: updated.scheduler_plan_bonus ?? 0,
         quota_rate_plus: updated.quota_rate_plus ?? 10,
@@ -338,6 +345,10 @@ export default function Settings() {
     { label: 'Pro', value: 'pro' },
     { label: 'Team', value: 'team' },
     { label: 'Enterprise', value: 'enterprise' },
+  ]
+  const schedulerModeOptions = [
+    { label: t('settings.schedulerModeBalanced'), value: 'balanced' },
+    { label: t('settings.schedulerModeStickySession'), value: 'sticky_session' },
   ]
 
   return (
@@ -851,6 +862,17 @@ export default function Settings() {
                   options={booleanOptions}
                 />
                 <p className="text-xs text-muted-foreground mt-1">{t('settings.fastSchedulerEnabledDesc')}</p>
+              </div>
+              <div>
+                <label className="block mb-2 text-sm font-semibold text-muted-foreground">{t('settings.schedulerMode')}</label>
+                <Select
+                  value={settingsForm.scheduler_mode}
+                  onValueChange={(value) =>
+                    setSettingsForm((f) => ({ ...f, scheduler_mode: normalizeSchedulerMode(value) }))
+                  }
+                  options={schedulerModeOptions}
+                />
+                <p className="text-xs text-muted-foreground mt-1">{t('settings.schedulerModeDesc')}</p>
               </div>
               <div>
                 <label className="block mb-2 text-sm font-semibold text-muted-foreground">{t('settings.plusPortEnabled')}</label>

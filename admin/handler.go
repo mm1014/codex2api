@@ -1976,6 +1976,7 @@ type settingsResponse struct {
 	FastSchedulerEnabled   bool    `json:"fast_scheduler_enabled"`
 	PlusPortEnabled        bool    `json:"plus_port_enabled"`
 	PlusPortAccessFree     bool    `json:"plus_port_access_free"`
+	SchedulerMode          string  `json:"scheduler_mode"`
 	SchedulerPreferredPlan string  `json:"scheduler_preferred_plan"`
 	SchedulerPlanBonus     int     `json:"scheduler_plan_bonus"`
 	QuotaRatePlus          float64 `json:"quota_rate_plus"`
@@ -2011,6 +2012,7 @@ type updateSettingsReq struct {
 	FastSchedulerEnabled   *bool    `json:"fast_scheduler_enabled"`
 	PlusPortEnabled        *bool    `json:"plus_port_enabled"`
 	PlusPortAccessFree     *bool    `json:"plus_port_access_free"`
+	SchedulerMode          *string  `json:"scheduler_mode"`
 	SchedulerPreferredPlan *string  `json:"scheduler_preferred_plan"`
 	SchedulerPlanBonus     *int     `json:"scheduler_plan_bonus"`
 	QuotaRatePlus          *float64 `json:"quota_rate_plus"`
@@ -2032,6 +2034,18 @@ func normalizeSchedulerPreferredPlan(raw string) (string, bool) {
 	switch normalized {
 	case "free", "plus", "pro", "team", "enterprise":
 		return normalized, true
+	default:
+		return "", false
+	}
+}
+
+func normalizeSchedulerMode(raw string) (string, bool) {
+	trimmed := strings.ToLower(strings.TrimSpace(raw))
+	switch trimmed {
+	case "", auth.SchedulerModeBalanced:
+		return auth.SchedulerModeBalanced, true
+	case auth.SchedulerModeStickySession:
+		return auth.SchedulerModeStickySession, true
 	default:
 		return "", false
 	}
@@ -2093,6 +2107,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		FastSchedulerEnabled:   h.store.FastSchedulerEnabled(),
 		PlusPortEnabled:        h.store.GetPlusPortEnabled(),
 		PlusPortAccessFree:     h.store.GetPlusPortAccessFree(),
+		SchedulerMode:          h.store.GetSchedulerMode(),
 		SchedulerPreferredPlan: h.store.GetPreferredPlanType(),
 		SchedulerPlanBonus:     h.store.GetPreferredPlanBonus(),
 		QuotaRatePlus:          quotaRatePlus,
@@ -2271,6 +2286,15 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		h.store.SetPlusPortAccessFree(*req.PlusPortAccessFree)
 		log.Printf("设置已更新: plus_port_access_free = %t", *req.PlusPortAccessFree)
 	}
+	if req.SchedulerMode != nil {
+		normalizedMode, ok := normalizeSchedulerMode(*req.SchedulerMode)
+		if !ok {
+			writeError(c, http.StatusBadRequest, "scheduler_mode 仅支持 balanced/sticky_session")
+			return
+		}
+		h.store.SetSchedulerMode(normalizedMode)
+		log.Printf("设置已更新: scheduler_mode = %s", h.store.GetSchedulerMode())
+	}
 
 	preferredPlan := h.store.GetPreferredPlanType()
 	preferredBonus := h.store.GetPreferredPlanBonus()
@@ -2391,6 +2415,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		FastSchedulerEnabled:   h.store.FastSchedulerEnabled(),
 		PlusPortEnabled:        h.store.GetPlusPortEnabled(),
 		PlusPortAccessFree:     h.store.GetPlusPortAccessFree(),
+		SchedulerMode:          h.store.GetSchedulerMode(),
 		SchedulerPreferredPlan: h.store.GetPreferredPlanType(),
 		SchedulerPlanBonus:     h.store.GetPreferredPlanBonus(),
 		QuotaRatePlus:          quotaRatePlus,
@@ -2438,6 +2463,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		FastSchedulerEnabled:   h.store.FastSchedulerEnabled(),
 		PlusPortEnabled:        h.store.GetPlusPortEnabled(),
 		PlusPortAccessFree:     h.store.GetPlusPortAccessFree(),
+		SchedulerMode:          h.store.GetSchedulerMode(),
 		SchedulerPreferredPlan: h.store.GetPreferredPlanType(),
 		SchedulerPlanBonus:     h.store.GetPreferredPlanBonus(),
 		QuotaRatePlus:          quotaRatePlus,

@@ -206,6 +206,7 @@ export interface SystemSettings {
   auto_clean_expired: boolean
   proxy_pool_enabled: boolean
   fast_scheduler_enabled: boolean
+  scheduler_mode: 'balanced' | 'sticky_session'
   plus_port_enabled: boolean
   plus_port_access_free: boolean
   scheduler_preferred_plan: string

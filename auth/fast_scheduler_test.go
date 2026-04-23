@@ -477,3 +477,178 @@ func TestStoreWaitForAvailableMatching(t *testing.T) {
 		t.Fatalf("WaitForAvailableMatching() picked dbID=%d, want free dbID=%d", got.DBID, free.DBID)
 	}
 }
+
+func TestStoreAcquireMatchingStickyReusesBoundAccount(t *testing.T) {
+	first := newFastSchedulerTestAccount(1, HealthTierHealthy, 100, 1)
+
+	store := &Store{
+		accounts:       []*Account{first},
+		maxConcurrency: 1,
+	}
+	store.SetSchedulerMode(SchedulerModeStickySession)
+
+	got := store.NextMatchingSticky(nil, nil, "sticky-key")
+	if got == nil {
+		t.Fatal("NextMatchingSticky() first pick returned nil")
+	}
+	if got.DBID != first.DBID {
+		t.Fatalf("first NextMatchingSticky() picked dbID=%d, want %d", got.DBID, first.DBID)
+	}
+	store.Release(got)
+
+	got = store.NextMatchingSticky(nil, nil, "sticky-key")
+	if got == nil {
+		t.Fatal("NextMatchingSticky() second pick returned nil")
+	}
+	defer store.Release(got)
+	if got.DBID != first.DBID {
+		t.Fatalf("second NextMatchingSticky() picked dbID=%d, want sticky dbID=%d", got.DBID, first.DBID)
+	}
+}
+
+func TestStoreAcquireMatchingStickyExpiresBindingAfterTTL(t *testing.T) {
+	first := newFastSchedulerTestAccount(1, HealthTierHealthy, 100, 1)
+	second := newFastSchedulerTestAccount(2, HealthTierHealthy, 90, 1)
+	second.Status = StatusError
+
+	store := &Store{
+		accounts:       []*Account{first, second},
+		maxConcurrency: 1,
+	}
+	store.SetSchedulerMode(SchedulerModeStickySession)
+
+	got := store.NextMatchingSticky(nil, nil, "sticky-key")
+	if got == nil {
+		t.Fatal("initial NextMatchingSticky() returned nil")
+	}
+	store.Release(got)
+
+	store.stickyMu.Lock()
+	store.stickyBindings["sticky-key"] = stickyBinding{
+		AccountID: first.DBID,
+		ExpiresAt: time.Now().Add(-time.Minute),
+	}
+	store.stickyMu.Unlock()
+
+	first.Status = StatusError
+	second.Status = StatusReady
+
+	got = store.NextMatchingSticky(nil, nil, "sticky-key")
+	if got == nil {
+		t.Fatal("expired NextMatchingSticky() returned nil")
+	}
+	defer store.Release(got)
+	if got.DBID != second.DBID {
+		t.Fatalf("expired NextMatchingSticky() picked dbID=%d, want %d", got.DBID, second.DBID)
+	}
+}
+
+func TestStoreAcquireMatchingStickyRefreshesBindingWhenExcluded(t *testing.T) {
+	first := newFastSchedulerTestAccount(1, HealthTierHealthy, 100, 1)
+	second := newFastSchedulerTestAccount(2, HealthTierHealthy, 90, 1)
+	second.Status = StatusError
+
+	store := &Store{
+		accounts:       []*Account{first, second},
+		maxConcurrency: 1,
+	}
+	store.SetSchedulerMode(SchedulerModeStickySession)
+
+	got := store.NextMatchingSticky(nil, nil, "sticky-key")
+	if got == nil {
+		t.Fatal("initial NextMatchingSticky() returned nil")
+	}
+	store.Release(got)
+	second.Status = StatusReady
+
+	got = store.NextMatchingSticky(map[int64]bool{first.DBID: true}, nil, "sticky-key")
+	if got == nil {
+		t.Fatal("fallback NextMatchingSticky() returned nil")
+	}
+	if got.DBID != second.DBID {
+		t.Fatalf("fallback NextMatchingSticky() picked dbID=%d, want %d", got.DBID, second.DBID)
+	}
+	store.Release(got)
+
+	got = store.NextMatchingSticky(nil, nil, "sticky-key")
+	if got == nil {
+		t.Fatal("refreshed NextMatchingSticky() returned nil")
+	}
+	defer store.Release(got)
+	if got.DBID != second.DBID {
+		t.Fatalf("refreshed NextMatchingSticky() picked dbID=%d, want refreshed dbID=%d", got.DBID, second.DBID)
+	}
+}
+
+func TestStoreAcquireMatchingStickyFallsBackWhenBoundAccountIsFull(t *testing.T) {
+	first := newFastSchedulerTestAccount(1, HealthTierHealthy, 100, 1)
+	second := newFastSchedulerTestAccount(2, HealthTierHealthy, 90, 1)
+	second.Status = StatusError
+
+	store := &Store{
+		accounts:       []*Account{first, second},
+		maxConcurrency: 1,
+	}
+	store.SetSchedulerMode(SchedulerModeStickySession)
+
+	got := store.NextMatchingSticky(nil, nil, "sticky-key")
+	if got == nil {
+		t.Fatal("initial NextMatchingSticky() returned nil")
+	}
+	second.Status = StatusReady
+
+	fallback := store.NextMatchingSticky(nil, nil, "sticky-key")
+	if fallback == nil {
+		t.Fatal("fallback NextMatchingSticky() returned nil")
+	}
+	if fallback.DBID != second.DBID {
+		t.Fatalf("fallback NextMatchingSticky() picked dbID=%d, want %d", fallback.DBID, second.DBID)
+	}
+	store.Release(fallback)
+	store.Release(got)
+
+	got = store.NextMatchingSticky(nil, nil, "sticky-key")
+	if got == nil {
+		t.Fatal("refreshed NextMatchingSticky() returned nil")
+	}
+	defer store.Release(got)
+	if got.DBID != second.DBID {
+		t.Fatalf("refreshed NextMatchingSticky() picked dbID=%d, want refreshed dbID=%d", got.DBID, second.DBID)
+	}
+}
+
+func TestStoreAcquireMatchingStickyWorksWithFastScheduler(t *testing.T) {
+	first := newFastSchedulerTestAccount(1, HealthTierHealthy, 100, 1)
+	second := newFastSchedulerTestAccount(2, HealthTierHealthy, 90, 1)
+
+	store := &Store{
+		accounts:       []*Account{first, second},
+		maxConcurrency: 1,
+	}
+	store.SetSchedulerMode(SchedulerModeStickySession)
+	store.SetFastSchedulerEnabled(true)
+
+	got := store.NextMatchingSticky(nil, nil, "sticky-key")
+	if got == nil {
+		t.Fatal("initial NextMatchingSticky() returned nil")
+	}
+	store.Release(got)
+
+	got = store.NextMatchingSticky(map[int64]bool{first.DBID: true}, nil, "sticky-key")
+	if got == nil {
+		t.Fatal("fallback NextMatchingSticky() returned nil")
+	}
+	if got.DBID != second.DBID {
+		t.Fatalf("fallback NextMatchingSticky() picked dbID=%d, want %d", got.DBID, second.DBID)
+	}
+	store.Release(got)
+
+	got = store.NextMatchingSticky(nil, nil, "sticky-key")
+	if got == nil {
+		t.Fatal("refreshed NextMatchingSticky() returned nil")
+	}
+	defer store.Release(got)
+	if got.DBID != second.DBID {
+		t.Fatalf("refreshed NextMatchingSticky() picked dbID=%d, want refreshed dbID=%d", got.DBID, second.DBID)
+	}
+}

@@ -12,7 +12,13 @@ services:
       - sqlite-data-local:/data
       - ./logs:/app/logs
     restart: unless-stopped
+    networks:
+      - resin_net
 
 volumes:
   sqlite-data-local:
     name: codex2api-sqlite-local_sqlite-data-local
+
+networks:
+  resin_net:
+    external: true

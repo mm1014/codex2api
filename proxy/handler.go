@@ -451,7 +451,7 @@ func (h *Handler) accountMatcherForCurrentPort(c *gin.Context) auth.AccountMatch
 	}
 }
 
-func (h *Handler) acquireAccountForRequest(c *gin.Context, exclude map[int64]bool) *auth.Account {
+func (h *Handler) acquireAccountForRequest(c *gin.Context, exclude map[int64]bool, stickyKey string) *auth.Account {
 	if h == nil || h.store == nil {
 		return nil
 	}
@@ -463,7 +463,7 @@ func (h *Handler) acquireAccountForRequest(c *gin.Context, exclude map[int64]boo
 	waitRounds := 0
 
 	tryPick := func() *auth.Account {
-		return h.store.NextMatching(exclude, matcher)
+		return h.store.NextMatchingSticky(exclude, matcher, stickyKey)
 	}
 
 	logSlowAcquire := func(acc *auth.Account) {
@@ -509,7 +509,7 @@ func (h *Handler) acquireAccountForRequest(c *gin.Context, exclude map[int64]boo
 			return nil
 		}
 		waitRounds++
-		acc := h.store.WaitForAvailableMatching(c.Request.Context(), waitFor, exclude, matcher)
+		acc := h.store.WaitForAvailableMatchingSticky(c.Request.Context(), waitFor, exclude, matcher, stickyKey)
 		if acc == nil {
 			if c != nil {
 				c.Set("x-scheduler-acquire-ms", time.Since(startedAt).Milliseconds())
@@ -769,7 +769,8 @@ func (h *Handler) Responses(c *gin.Context) {
 
 	rawBody = normalizeServiceTierField(rawBody)
 	isStream := gjson.GetBytes(rawBody, "stream").Bool()
-	sessionID := ResolveSessionID(c.GetHeader("Authorization"), rawBody)
+	stickyKey := ResolveExplicitSessionKey(c.Request.Header, rawBody)
+	sessionID := ResolveSessionID(c.Request.Header, c.GetHeader("Authorization"), rawBody)
 	reasoningEffort := extractReasoningEffort(rawBody)
 	serviceTier := extractServiceTier(rawBody)
 	if serviceTier != "" {
@@ -834,7 +835,7 @@ func (h *Handler) Responses(c *gin.Context) {
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		acquireStartedAt := time.Now()
-		account := h.acquireAccountForRequest(c, excludeAccounts)
+		account := h.acquireAccountForRequest(c, excludeAccounts, stickyKey)
 		attemptAcquireMs := int(time.Since(acquireStartedAt).Milliseconds())
 		if account == nil {
 			if lastStatusCode != 0 && len(lastBody) > 0 {
@@ -1269,7 +1270,8 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		return
 	}
 
-	sessionID := ResolveSessionID(c.GetHeader("Authorization"), codexBody)
+	stickyKey := ResolveExplicitSessionKey(c.Request.Header, rawBody)
+	sessionID := ResolveSessionID(c.Request.Header, c.GetHeader("Authorization"), codexBody)
 
 	// 3. 带重试的上游请求
 	maxRetries := h.getMaxRetries()
@@ -1282,7 +1284,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		acquireStartedAt := time.Now()
-		account := h.acquireAccountForRequest(c, excludeAccounts)
+		account := h.acquireAccountForRequest(c, excludeAccounts, stickyKey)
 		attemptAcquireMs := int(time.Since(acquireStartedAt).Milliseconds())
 		if account == nil {
 			if lastStatusCode != 0 && len(lastBody) > 0 {

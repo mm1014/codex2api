@@ -12,16 +12,91 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestResolveExplicitSessionKey(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers http.Header
+		body    []byte
+		want    string
+	}{
+		{
+			name: "session_id header has highest priority",
+			headers: func() http.Header {
+				h := http.Header{}
+				h.Set("session_id", "header-session")
+				h.Set("conversation_id", "header-conversation")
+				return h
+			}(),
+			body: []byte(`{"prompt_cache_key":"body-cache","execution_session":"body-execution"}`),
+			want: "header-session",
+		},
+		{
+			name: "conversation_id header wins over body",
+			headers: func() http.Header {
+				h := http.Header{}
+				h.Set("conversation_id", "header-conversation")
+				return h
+			}(),
+			body: []byte(`{"prompt_cache_key":"body-cache","execution_session":"body-execution"}`),
+			want: "header-conversation",
+		},
+		{
+			name:    "prompt_cache_key wins over execution_session",
+			headers: http.Header{},
+			body:    []byte(`{"prompt_cache_key":"body-cache","execution_session":"body-execution"}`),
+			want:    "body-cache",
+		},
+		{
+			name:    "execution_session used when prompt_cache_key absent",
+			headers: http.Header{},
+			body:    []byte(`{"execution_session":"body-execution"}`),
+			want:    "body-execution",
+		},
+		{
+			name:    "blank values do not produce sticky key",
+			headers: http.Header{},
+			body:    []byte(`{"prompt_cache_key":"   ","execution_session":"  "}`),
+			want:    "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ResolveExplicitSessionKey(tt.headers, tt.body); got != tt.want {
+				t.Fatalf("ResolveExplicitSessionKey() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveSessionIDPrefersExplicitHeaders(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("session_id", "explicit-session")
+
+	got := ResolveSessionID(headers, "Bearer sk-test", []byte(`{"prompt_cache_key":"body-cache"}`))
+	if got != "explicit-session" {
+		t.Fatalf("ResolveSessionID() = %q, want %q", got, "explicit-session")
+	}
+}
+
+func TestResolveSessionIDFallsBackToAPIKeyWhenExplicitKeyMissing(t *testing.T) {
+	got := ResolveSessionID(http.Header{}, "Bearer sk-test", []byte(`{}`))
+	want := uuid.NewSHA1(uuid.NameSpaceOID, []byte("codex2api:prompt-cache:sk-test")).String()
+	if got != want {
+		t.Fatalf("ResolveSessionID() = %q, want %q", got, want)
+	}
+}
+
 func TestResolveContinuity(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	tests := []struct {
-		name        string
-		ctx         context.Context
-		account     *auth.Account
-		req         Request
-		opts        Options
-		wantSource  string
+		name         string
+		ctx          context.Context
+		account      *auth.Account
+		req          Request
+		opts         Options
+		wantSource   string
 		wantNonEmpty bool
 	}{
 		{
@@ -285,7 +360,7 @@ func TestApplyContinuityHeaders(t *testing.T) {
 			wantValue:  "",
 		},
 		{
-			name: "nil headers",
+			name:       "nil headers",
 			headers:    nil,
 			continuity: Continuity{Key: "session-456", Source: "test"},
 			wantValue:  "",

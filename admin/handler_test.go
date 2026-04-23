@@ -14,6 +14,7 @@ import (
 	"github.com/codex2api/auth"
 	"github.com/codex2api/cache"
 	"github.com/codex2api/database"
+	"github.com/codex2api/proxy"
 	"github.com/gin-gonic/gin"
 )
 
@@ -252,5 +253,135 @@ func TestUpdateAccountProxyRouteRejectsRuntimeStateMismatch(t *testing.T) {
 	}
 	if got := rows[0].ProxyURL; got != "http://127.0.0.1:7890" {
 		t.Fatalf("persisted proxy_url = %q, want %q", got, "http://127.0.0.1:7890")
+	}
+}
+
+func TestGetSettingsIncludesSchedulerMode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	dbPath := filepath.Join(t.TempDir(), "settings-get.db")
+	db, err := database.New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) returned error: %v", err)
+	}
+	defer db.Close()
+
+	settings := &database.SystemSettings{
+		MaxConcurrency: 2,
+		GlobalRPM:      33,
+		TestModel:      "gpt-5.4",
+		SchedulerMode:  auth.SchedulerModeStickySession,
+	}
+	if err := db.UpdateSystemSettings(context.Background(), settings); err != nil {
+		t.Fatalf("UpdateSystemSettings() returned error: %v", err)
+	}
+
+	store := auth.NewStore(db, cache.NewMemory(8), settings)
+	rateLimiter := proxy.NewRateLimiter(settings.GlobalRPM)
+	handler := NewHandler(store, db, cache.NewMemory(8), rateLimiter, "")
+	handler.SetPoolSizes(50, 30)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/admin/settings", nil)
+
+	handler.GetSettings(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+
+	var resp settingsResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.SchedulerMode != auth.SchedulerModeStickySession {
+		t.Fatalf("scheduler_mode = %q, want %q", resp.SchedulerMode, auth.SchedulerModeStickySession)
+	}
+}
+
+func TestUpdateSettingsPersistsSchedulerMode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	dbPath := filepath.Join(t.TempDir(), "settings-update.db")
+	db, err := database.New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) returned error: %v", err)
+	}
+	defer db.Close()
+
+	settings := &database.SystemSettings{
+		MaxConcurrency: 2,
+		GlobalRPM:      10,
+		TestModel:      "gpt-5.4",
+		SchedulerMode:  auth.SchedulerModeBalanced,
+	}
+	if err := db.UpdateSystemSettings(context.Background(), settings); err != nil {
+		t.Fatalf("UpdateSystemSettings() returned error: %v", err)
+	}
+
+	store := auth.NewStore(db, cache.NewMemory(8), settings)
+	handler := NewHandler(store, db, cache.NewMemory(8), proxy.NewRateLimiter(settings.GlobalRPM), "")
+	handler.SetPoolSizes(50, 30)
+
+	body := bytes.NewBufferString(`{"scheduler_mode":"sticky_session"}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/admin/settings", body)
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = req
+
+	handler.UpdateSettings(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if got := store.GetSchedulerMode(); got != auth.SchedulerModeStickySession {
+		t.Fatalf("store scheduler_mode = %q, want %q", got, auth.SchedulerModeStickySession)
+	}
+
+	persisted, err := db.GetSystemSettings(context.Background())
+	if err != nil {
+		t.Fatalf("GetSystemSettings() returned error: %v", err)
+	}
+	if persisted == nil {
+		t.Fatal("GetSystemSettings() returned nil")
+	}
+	if persisted.SchedulerMode != auth.SchedulerModeStickySession {
+		t.Fatalf("persisted scheduler_mode = %q, want %q", persisted.SchedulerMode, auth.SchedulerModeStickySession)
+	}
+}
+
+func TestUpdateSettingsRejectsInvalidSchedulerMode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	dbPath := filepath.Join(t.TempDir(), "settings-invalid.db")
+	db, err := database.New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) returned error: %v", err)
+	}
+	defer db.Close()
+
+	settings := &database.SystemSettings{
+		MaxConcurrency: 2,
+		GlobalRPM:      10,
+		TestModel:      "gpt-5.4",
+		SchedulerMode:  auth.SchedulerModeBalanced,
+	}
+	store := auth.NewStore(db, cache.NewMemory(8), settings)
+	handler := NewHandler(store, db, cache.NewMemory(8), proxy.NewRateLimiter(settings.GlobalRPM), "")
+	handler.SetPoolSizes(50, 30)
+
+	body := bytes.NewBufferString(`{"scheduler_mode":"hotspot"}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/admin/settings", body)
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = req
+
+	handler.UpdateSettings(ctx)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
 	}
 }
