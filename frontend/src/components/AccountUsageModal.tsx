@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts'
+import type { NameType, ValueType } from 'recharts/types/component/DefaultTooltipContent'
 import Modal from './Modal'
 import { api } from '../api'
 import type { AccountRow, AccountUsageDetail } from '../types'
@@ -68,7 +69,10 @@ export default function AccountUsageModal({ account, onClose }: Props) {
                     ))}
                   </Pie>
                   <Tooltip
-                    formatter={(value: number, name: string) => [`${value} 次`, name]}
+                    formatter={(value: ValueType | undefined, name: NameType | undefined) => {
+                      const displayValue = Array.isArray(value) ? value.join(', ') : value ?? 0
+                      return [`${displayValue} 次`, name ?? '']
+                    }}
                     contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid hsl(var(--border))' }}
                   />
                 </PieChart>

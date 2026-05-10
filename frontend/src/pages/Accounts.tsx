@@ -1,4 +1,4 @@
-import type { ChangeEvent } from 'react'
+import type { ChangeEvent, ReactElement } from 'react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, getAdminKey } from '../api'
 import Modal from '../components/Modal'
@@ -15,6 +15,7 @@ import { getErrorMessage } from '../utils/error'
 import { formatRelativeTime, formatBeijingTime } from '../utils/time'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import {
   Table,
@@ -24,7 +25,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { Plus, RefreshCw, Trash2, Zap, FlaskConical, Ban, Timer, AlertTriangle, Upload, Download, ArrowDownToLine, KeyRound, ExternalLink, FileText, FileJson, BarChart3, Search, Fingerprint, Pencil } from 'lucide-react'
+import { Plus, RefreshCw, Trash2, Zap, FlaskConical, Ban, Timer, AlertTriangle, Upload, Download, ArrowDownToLine, KeyRound, ExternalLink, FileText, FileJson, BarChart3, Search, Fingerprint, Pencil, BadgeCheck, BadgeX } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
 import AccountUsageModal from '../components/AccountUsageModal'
@@ -806,6 +807,29 @@ export default function Accounts() {
     setEditingProxyURL(account.proxy_url || '')
   }
 
+  const handleToggleSold = async (account: AccountRow) => {
+    const currentSold = Boolean(account.is_sold)
+    const nextSold = !currentSold
+    const accountLabel = account.email || `ID ${account.id}`
+    const confirmed = await confirm({
+      title: accountLabel,
+      description: t('accounts.toggleSoldConfirm', {
+        account: accountLabel,
+        state: nextSold ? t('accounts.sold') : t('accounts.unsold'),
+      }),
+      tone: 'warning',
+    })
+    if (!confirmed) return
+
+    try {
+      await api.updateAccount(account.id, { is_sold: nextSold })
+      showToast(nextSold ? t('accounts.sold') : t('accounts.unsold'))
+      await reload()
+    } catch (error) {
+      showToast(getErrorMessage(error), 'error')
+    }
+  }
+
   const handleCloseEditProxy = () => {
     setEditingProxyAccount(null)
     setEditingProxyURL('')
@@ -900,9 +924,10 @@ export default function Accounts() {
 
   const handleBatchDelete = async () => {
     if (selected.size === 0) return
+    const selectedIds = Array.from(selected)
     const confirmed = await confirm({
       title: t('accounts.batchDeleteTitle'),
-      description: t('accounts.batchDeleteDesc', { count: selected.size }),
+      description: t('accounts.batchDeleteDesc', { count: selectedIds.length }),
       confirmText: t('accounts.deleteConfirm'),
       tone: 'destructive',
       confirmVariant: 'destructive',
@@ -911,36 +936,79 @@ export default function Accounts() {
     setBatchLoading(true)
     let success = 0
     let fail = 0
-    for (const id of selected) {
-      try {
-        await api.deleteAccount(id)
-        success++
-      } catch {
-        fail++
+    try {
+      for (const id of selectedIds) {
+        try {
+          await api.deleteAccount(id)
+          success++
+        } catch {
+          fail++
+        }
       }
+      showToast(t('accounts.batchDeleteDone', { success, fail }))
+      setSelected(new Set())
+      void reload()
+    } finally {
+      setBatchLoading(false)
     }
-    showToast(t('accounts.batchDeleteDone', { success, fail }))
-    setSelected(new Set())
-    setBatchLoading(false)
-    void reload()
   }
 
   const handleBatchRefresh = async () => {
     if (selected.size === 0) return
+    const selectedIds = Array.from(selected)
     setBatchLoading(true)
     let success = 0
     let fail = 0
-    for (const id of selected) {
-      try {
-        await api.refreshAccount(id)
-        success++
-      } catch {
-        fail++
+    try {
+      for (const id of selectedIds) {
+        try {
+          await api.refreshAccount(id)
+          success++
+        } catch {
+          fail++
+        }
       }
+      showToast(t('accounts.batchRefreshDone', { success, fail }))
+      void reload()
+    } finally {
+      setBatchLoading(false)
     }
-    showToast(t('accounts.batchRefreshDone', { success, fail }))
-    setBatchLoading(false)
-    void reload()
+  }
+
+  const handleBatchToggleSold = async (nextSold: boolean) => {
+    if (selected.size === 0) return
+    const selectedIds = Array.from(selected)
+    const stateLabel = nextSold ? t('accounts.sold') : t('accounts.unsold')
+    const confirmed = await confirm({
+      title: t('accounts.batchSetSoldTitle', { state: stateLabel }),
+      description: t('accounts.batchSetSoldDesc', {
+        count: selectedIds.length,
+        state: stateLabel,
+      }),
+      tone: 'warning',
+    })
+    if (!confirmed) return
+    setBatchLoading(true)
+    let success = 0
+    let fail = 0
+    try {
+      for (const id of selectedIds) {
+        try {
+          await api.updateAccount(id, { is_sold: nextSold })
+          success++
+        } catch {
+          fail++
+        }
+      }
+      showToast(t('accounts.batchSetSoldDone', {
+        state: stateLabel,
+        success,
+        fail,
+      }))
+      void reload()
+    } finally {
+      setBatchLoading(false)
+    }
   }
 
   const handleBatchTest = async () => {
@@ -1239,9 +1307,17 @@ export default function Accounts() {
         />
 
         {selected.size > 0 && (
-          <div className="flex items-center justify-between gap-3 px-4 py-2.5 mb-4 rounded-2xl bg-primary/10 border border-primary/20 text-sm font-semibold text-primary">
-            <span>{t('common.selected', { count: selected.size })}</span>
-            <div className="flex items-center gap-1.5">
+          <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-2.5 mb-4 rounded-2xl bg-primary/10 border border-primary/20 text-sm font-semibold text-primary">
+            <span className="whitespace-nowrap">{t('common.selected', { count: selected.size })}</span>
+            <div className="flex flex-wrap items-center justify-end gap-1.5">
+              <Button variant="outline" size="sm" disabled={batchLoading} onClick={() => void handleBatchToggleSold(true)}>
+                <BadgeCheck className="size-3.5" />
+                {t('accounts.batchSold')}
+              </Button>
+              <Button variant="outline" size="sm" disabled={batchLoading} onClick={() => void handleBatchToggleSold(false)}>
+                <BadgeX className="size-3.5" />
+                {t('accounts.batchUnsold')}
+              </Button>
               <Button variant="outline" size="sm" disabled={batchLoading} onClick={() => void handleBatchRefresh()}>
                 {t('accounts.batchRefresh')}
               </Button>
@@ -1324,6 +1400,7 @@ export default function Accounts() {
                         }
                         return Math.max(0, Math.floor(account.wait_probe_remaining_seconds ?? 0))
                       })()
+                      const isSold = Boolean(account.is_sold)
 
                       return (
                         <TableRow key={account.id} className={selected.has(account.id) ? 'bg-primary/5' : ''}>
@@ -1338,6 +1415,24 @@ export default function Accounts() {
                         <TableCell className="text-[14px] font-mono text-muted-foreground">{account.id}</TableCell>
                         <TableCell className="text-[14px] text-muted-foreground">
                           {account.email || '-'}
+                          <Badge
+                            asChild
+                            variant="outline"
+                            className={`ml-1.5 h-5 align-middle cursor-pointer gap-1 px-1.5 text-[11px] font-semibold leading-none transition-colors ${
+                              isSold
+                                ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-700 hover:bg-emerald-500/20 dark:text-emerald-300'
+                                : 'border-slate-500/20 bg-slate-500/10 text-slate-600 hover:bg-slate-500/20 dark:text-slate-300'
+                            }`}
+                          >
+                            <button
+                              type="button"
+                              onClick={() => void handleToggleSold(account)}
+                              aria-pressed={isSold}
+                            >
+                              <span className={`size-1.5 shrink-0 rounded-full ${isSold ? 'bg-emerald-500' : 'bg-slate-500'}`} />
+                              {isSold ? t('accounts.sold') : t('accounts.unsold')}
+                            </button>
+                          </Badge>
                           {account.at_only && (
                             <span className="ml-1.5 inline-flex items-center rounded-md bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 ring-1 ring-inset ring-amber-600/20 dark:bg-amber-950 dark:text-amber-400 dark:ring-amber-400/20">
                               AT
@@ -2380,7 +2475,7 @@ function UsageCell({ account, t }: { account: AccountRow; t: (key: string, optio
       })
     : t('accounts.uploadSourceAdmin')
 
-  const wrap = (content: JSX.Element, widthClass: string) => (
+  const wrap = (content: ReactElement, widthClass: string) => (
     <div className={`${widthClass} space-y-1`}>
       <div className="text-[11px] text-muted-foreground">{uploaderText}</div>
       {content}

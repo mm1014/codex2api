@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -44,6 +45,45 @@ func parseDBNullTimeValue(value interface{}) (sql.NullTime, error) {
 		return sql.NullTime{}, nil
 	}
 	return sql.NullTime{Time: t, Valid: true}, nil
+}
+
+func parseDBBoolValue(value interface{}) (bool, error) {
+	switch v := value.(type) {
+	case nil:
+		return false, nil
+	case bool:
+		return v, nil
+	case int:
+		return v != 0, nil
+	case int8:
+		return v != 0, nil
+	case int16:
+		return v != 0, nil
+	case int32:
+		return v != 0, nil
+	case int64:
+		return v != 0, nil
+	case float32:
+		return v != 0, nil
+	case float64:
+		return v != 0, nil
+	case string:
+		s := strings.TrimSpace(strings.ToLower(v))
+		if s == "" {
+			return false, nil
+		}
+		if parsed, err := strconv.ParseBool(s); err == nil {
+			return parsed, nil
+		}
+		if parsed, err := strconv.Atoi(s); err == nil {
+			return parsed != 0, nil
+		}
+		return false, fmt.Errorf("无法解析布尔值: %q", v)
+	case []byte:
+		return parseDBBoolValue(string(v))
+	default:
+		return false, fmt.Errorf("不支持的布尔类型: %T", value)
+	}
 }
 
 func parseDBTimeString(value string) (time.Time, error) {

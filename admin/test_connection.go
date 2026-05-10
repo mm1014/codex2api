@@ -107,17 +107,17 @@ func (h *Handler) TestConnection(c *gin.Context) {
 
 	// 解析 SSE 流
 	hasContent := false
+	completed := false
+	failed := false
 	_ = proxy.ReadSSEStream(resp.Body, func(data []byte) bool {
-		eventType := gjson.GetBytes(data, "type").String()
+		if text := extractResponseOutputText(data); text != "" {
+			hasContent = true
+			sendTestEvent(c, testEvent{Type: "content", Text: text})
+		}
 
-		switch eventType {
-		case "response.output_text.delta":
-			delta := gjson.GetBytes(data, "delta").String()
-			if delta != "" {
-				hasContent = true
-				sendTestEvent(c, testEvent{Type: "content", Text: delta})
-			}
+		switch gjson.GetBytes(data, "type").String() {
 		case "response.completed":
+			completed = true
 			account.ClearLastFailureDetail()
 			if _, cooldownReason, active := account.GetCooldownSnapshot(); active && cooldownReason == "full_usage" {
 				if !h.store.MarkFullUsageCooldownFromSnapshot(account) {
@@ -134,16 +134,16 @@ func (h *Handler) TestConnection(c *gin.Context) {
 			sendTestEvent(c, testEvent{Type: "test_complete", Success: true})
 			return false
 		case "response.failed":
-			errMsg := gjson.GetBytes(data, "response.status_details.error.message").String()
-			if errMsg == "" {
-				errMsg = "上游返回 response.failed"
-			}
-			sendTestEvent(c, testEvent{Type: "error", Error: errMsg})
+			failed = true
+			sendTestEvent(c, testEvent{Type: "error", Error: extractResponseFailureMessage(data)})
 			return false
 		}
 		return true
 	})
 
+	if failed || completed {
+		return
+	}
 	if !hasContent {
 		sendTestEvent(c, testEvent{Type: "error", Error: "未收到模型输出"})
 	}

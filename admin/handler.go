@@ -257,6 +257,7 @@ type accountResponse struct {
 	LastFailureCode     string                     `json:"last_failure_code,omitempty"`
 	LastFailureMessage  string                     `json:"last_failure_message,omitempty"`
 	ATOnly              bool                       `json:"at_only"`
+	IsSold              bool                       `json:"is_sold"`
 	HealthTier          string                     `json:"health_tier"`
 	SchedulerScore      float64                    `json:"scheduler_score"`
 	ConcurrencyCap      int64                      `json:"dynamic_concurrency_limit"`
@@ -327,6 +328,7 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 			SettlementAmountUSD: row.SettledAmount,
 			Status:              row.Status,
 			ATOnly:              !hasRT && hasAT,
+			IsSold:              row.IsSold,
 			ProxyURL:            row.ProxyURL,
 			CreatedAt:           row.CreatedAt.Format(time.RFC3339),
 			UpdatedAt:           row.UpdatedAt.Format(time.RFC3339),
@@ -604,6 +606,7 @@ type addATAccountReq struct {
 
 type updateAccountReq struct {
 	ProxyURL *string `json:"proxy_url"`
+	IsSold   *bool   `json:"is_sold"`
 }
 
 // AddATAccount 添加 AT-only 账号（支持批量：access_token 按行分割）
@@ -729,7 +732,7 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 	})
 }
 
-// UpdateAccount 更新已有账号的可编辑字段（当前仅支持 proxy_url）。
+// UpdateAccount 更新已有账号的可编辑字段（proxy_url / is_sold，一次只允许改一个字段）。
 func (h *Handler) UpdateAccount(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || id <= 0 {
@@ -742,49 +745,73 @@ func (h *Handler) UpdateAccount(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "请求格式错误")
 		return
 	}
-	if req.ProxyURL == nil {
-		writeError(c, http.StatusBadRequest, "proxy_url 是必填字段")
+	if (req.ProxyURL == nil && req.IsSold == nil) || (req.ProxyURL != nil && req.IsSold != nil) {
+		writeError(c, http.StatusBadRequest, "一次只能修改一个字段")
 		return
 	}
 
-	proxyURL := strings.TrimSpace(security.SanitizeInput(*req.ProxyURL))
-	if err := security.ValidateProxyURL(proxyURL); err != nil {
-		writeError(c, http.StatusBadRequest, "代理URL无效")
+	if req.ProxyURL != nil {
+		proxyURL := strings.TrimSpace(security.SanitizeInput(*req.ProxyURL))
+		if err := security.ValidateProxyURL(proxyURL); err != nil {
+			writeError(c, http.StatusBadRequest, "代理URL无效")
+			return
+		}
+		if h.db == nil {
+			writeError(c, http.StatusInternalServerError, "数据库未初始化")
+			return
+		}
+		if h.store == nil {
+			writeError(c, http.StatusInternalServerError, "运行时号池未初始化")
+			return
+		}
+		if h.store.FindByID(id) == nil {
+			writeError(c, http.StatusConflict, fmt.Sprintf("账号 %d 未加载到运行时号池，请刷新或重启服务后重试", id))
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+		defer cancel()
+
+		if err := h.db.UpdateAccountProxyURL(ctx, id, proxyURL); err != nil {
+			if err == sql.ErrNoRows {
+				writeError(c, http.StatusNotFound, fmt.Sprintf("账号 %d 不存在", id))
+				return
+			}
+			writeError(c, http.StatusInternalServerError, "更新账号代理失败: "+err.Error())
+			return
+		}
+
+		if !h.store.UpdateAccountProxyURL(id, proxyURL) {
+			writeError(c, http.StatusConflict, fmt.Sprintf("账号 %d 代理已持久化，但运行时同步失败，请刷新或重启服务后重试", id))
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"message":   "账号代理已更新",
+			"proxy_url": proxyURL,
+		})
 		return
 	}
+
 	if h.db == nil {
 		writeError(c, http.StatusInternalServerError, "数据库未初始化")
 		return
 	}
-	if h.store == nil {
-		writeError(c, http.StatusInternalServerError, "运行时号池未初始化")
-		return
-	}
-	if h.store.FindByID(id) == nil {
-		writeError(c, http.StatusConflict, fmt.Sprintf("账号 %d 未加载到运行时号池，请刷新或重启服务后重试", id))
-		return
-	}
-
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
 
-	if err := h.db.UpdateAccountProxyURL(ctx, id, proxyURL); err != nil {
+	if err := h.db.UpdateAccountSold(ctx, id, *req.IsSold); err != nil {
 		if err == sql.ErrNoRows {
 			writeError(c, http.StatusNotFound, fmt.Sprintf("账号 %d 不存在", id))
 			return
 		}
-		writeError(c, http.StatusInternalServerError, "更新账号代理失败: "+err.Error())
-		return
-	}
-
-	if !h.store.UpdateAccountProxyURL(id, proxyURL) {
-		writeError(c, http.StatusConflict, fmt.Sprintf("账号 %d 代理已持久化，但运行时同步失败，请刷新或重启服务后重试", id))
+		writeError(c, http.StatusInternalServerError, "更新账号售出状态失败: "+err.Error())
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":   "账号代理已更新",
-		"proxy_url": proxyURL,
+		"message":  "账号售出状态已更新",
+		"is_sold":  *req.IsSold,
 	})
 }
 

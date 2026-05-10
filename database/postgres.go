@@ -23,6 +23,7 @@ type AccountRow struct {
 	Type           string
 	Credentials    map[string]interface{}
 	ProxyURL       string
+	IsSold         bool
 	PublicAPIKeyID sql.NullInt64
 	SettledAmount  float64
 	Status         string
@@ -54,8 +55,11 @@ func (a *AccountRow) GetCredential(key string) string {
 
 // DB PostgreSQL 数据库操作
 type DB struct {
-	conn   *sql.DB
-	driver string
+	conn                        *sql.DB
+	driver                      string
+	registeredAccountsDBPath    string
+	registeredAccountsSyncURL   string
+	registeredAccountsSyncToken string
 
 	// 使用日志批量写入缓冲
 	logBuf  []usageLogEntry
@@ -191,6 +195,7 @@ func (db *DB) migrate(ctx context.Context) error {
 		type          VARCHAR(50) DEFAULT 'oauth',
 		credentials   JSONB NOT NULL DEFAULT '{}',
 		proxy_url     VARCHAR(500) DEFAULT '',
+		is_sold       BOOLEAN DEFAULT FALSE,
 		status        VARCHAR(50) DEFAULT 'active',
 		error_message TEXT DEFAULT '',
 		created_at    TIMESTAMP DEFAULT NOW(),
@@ -200,6 +205,7 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS cooldown_reason VARCHAR(50) DEFAULT '';
 	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS cooldown_until TIMESTAMP NULL;
 	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS public_api_key_id BIGINT NULL;
+	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS is_sold BOOLEAN DEFAULT FALSE;
 
 	CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts(status);
 	CREATE INDEX IF NOT EXISTS idx_accounts_status_id ON accounts(status, id);
@@ -1618,6 +1624,7 @@ func (db *DB) GetAccountRequestCounts(ctx context.Context) (map[int64]*AccountRe
 func (db *DB) ListActive(ctx context.Context) ([]*AccountRow, error) {
 	query := `
 		SELECT a.id, a.name, a.platform, a.type, a.credentials, a.proxy_url,
+		       a.is_sold,
 		       a.public_api_key_id,
 		       COALESCE(s.settled_amount_usd, 0) AS settled_amount_usd,
 		       a.status, a.cooldown_reason, a.cooldown_until,
@@ -1641,6 +1648,7 @@ func (db *DB) ListActive(ctx context.Context) ([]*AccountRow, error) {
 		var cooldownUntilRaw interface{}
 		var createdAtRaw interface{}
 		var updatedAtRaw interface{}
+		var isSoldRaw interface{}
 		if err := rows.Scan(
 			&a.ID,
 			&a.Name,
@@ -1648,6 +1656,7 @@ func (db *DB) ListActive(ctx context.Context) ([]*AccountRow, error) {
 			&a.Type,
 			&credRaw,
 			&a.ProxyURL,
+			&isSoldRaw,
 			&a.PublicAPIKeyID,
 			&a.SettledAmount,
 			&a.Status,
@@ -1660,6 +1669,11 @@ func (db *DB) ListActive(ctx context.Context) ([]*AccountRow, error) {
 			return nil, fmt.Errorf("扫描账号行失败: %w", err)
 		}
 		a.Credentials = decodeCredentials(credRaw)
+		var err error
+		a.IsSold, err = parseDBBoolValue(isSoldRaw)
+		if err != nil {
+			return nil, fmt.Errorf("解析 is_sold 失败: %w", err)
+		}
 		a.CooldownUntil, err = parseDBNullTimeValue(cooldownUntilRaw)
 		if err != nil {
 			return nil, fmt.Errorf("解析 cooldown_until 失败: %w", err)
@@ -1695,6 +1709,7 @@ func (db *DB) ListActiveForAdmin(ctx context.Context) ([]*AccountRow, error) {
 		         'access_token_present', CASE WHEN COALESCE(a.credentials->>'access_token', '') <> '' THEN '1' ELSE '' END
 		       ) AS credentials,
 		       a.proxy_url,
+		       COALESCE(a.is_sold, false) AS is_sold,
 		       a.public_api_key_id,
 		       COALESCE(s.settled_amount_usd, 0) AS settled_amount_usd,
 		       a.status, a.cooldown_reason, a.cooldown_until,
@@ -1720,6 +1735,7 @@ func (db *DB) ListActiveForAdmin(ctx context.Context) ([]*AccountRow, error) {
 		         'access_token_present', CASE WHEN COALESCE(json_extract(a.credentials, '$.access_token'), '') <> '' THEN '1' ELSE '' END
 		       ) AS credentials,
 		       a.proxy_url,
+		       COALESCE(a.is_sold, 0) AS is_sold,
 		       a.public_api_key_id,
 		       COALESCE(s.settled_amount_usd, 0) AS settled_amount_usd,
 		       a.status, a.cooldown_reason, a.cooldown_until,
@@ -1752,6 +1768,7 @@ func (db *DB) ListActiveForAdmin(ctx context.Context) ([]*AccountRow, error) {
 			var cooldownUntilRaw interface{}
 			var createdAtRaw interface{}
 			var updatedAtRaw interface{}
+			var isSoldRaw interface{}
 			if err := rows.Scan(
 				&a.ID,
 				&a.Name,
@@ -1759,6 +1776,7 @@ func (db *DB) ListActiveForAdmin(ctx context.Context) ([]*AccountRow, error) {
 				&a.Type,
 				&credRaw,
 				&a.ProxyURL,
+				&isSoldRaw,
 				&a.PublicAPIKeyID,
 				&a.SettledAmount,
 				&a.Status,
@@ -1772,6 +1790,12 @@ func (db *DB) ListActiveForAdmin(ctx context.Context) ([]*AccountRow, error) {
 				return nil, fmt.Errorf("扫描账号行失败: %w", err)
 			}
 			a.Credentials = decodeCredentials(credRaw)
+			var err error
+			a.IsSold, err = parseDBBoolValue(isSoldRaw)
+			if err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("解析 is_sold 失败: %w", err)
+			}
 			a.CooldownUntil, err = parseDBNullTimeValue(cooldownUntilRaw)
 			if err != nil {
 				rows.Close()
@@ -1810,6 +1834,7 @@ func (db *DB) ListActiveForAdmin(ctx context.Context) ([]*AccountRow, error) {
 func (db *DB) ListAll(ctx context.Context) ([]*AccountRow, error) {
 	query := `
 		SELECT a.id, a.name, a.platform, a.type, a.credentials, a.proxy_url,
+		       a.is_sold,
 		       a.public_api_key_id,
 		       COALESCE(s.settled_amount_usd, 0) AS settled_amount_usd,
 		       a.status, a.cooldown_reason, a.cooldown_until,
@@ -1832,6 +1857,7 @@ func (db *DB) ListAll(ctx context.Context) ([]*AccountRow, error) {
 		var cooldownUntilRaw interface{}
 		var createdAtRaw interface{}
 		var updatedAtRaw interface{}
+		var isSoldRaw interface{}
 		if err := rows.Scan(
 			&a.ID,
 			&a.Name,
@@ -1839,6 +1865,7 @@ func (db *DB) ListAll(ctx context.Context) ([]*AccountRow, error) {
 			&a.Type,
 			&credRaw,
 			&a.ProxyURL,
+			&isSoldRaw,
 			&a.PublicAPIKeyID,
 			&a.SettledAmount,
 			&a.Status,
@@ -1851,6 +1878,11 @@ func (db *DB) ListAll(ctx context.Context) ([]*AccountRow, error) {
 			return nil, fmt.Errorf("扫描账号行失败: %w", err)
 		}
 		a.Credentials = decodeCredentials(credRaw)
+		var err error
+		a.IsSold, err = parseDBBoolValue(isSoldRaw)
+		if err != nil {
+			return nil, fmt.Errorf("解析 is_sold 失败: %w", err)
+		}
 		a.CooldownUntil, err = parseDBNullTimeValue(cooldownUntilRaw)
 		if err != nil {
 			return nil, fmt.Errorf("解析 cooldown_until 失败: %w", err)
@@ -1872,6 +1904,7 @@ func (db *DB) ListAll(ctx context.Context) ([]*AccountRow, error) {
 func (db *DB) GetAccountByID(ctx context.Context, id int64) (*AccountRow, error) {
 	query := `
 		SELECT a.id, a.name, a.platform, a.type, a.credentials, a.proxy_url,
+		       a.is_sold,
 		       a.public_api_key_id,
 		       COALESCE(s.settled_amount_usd, 0) AS settled_amount_usd,
 		       a.status, a.cooldown_reason, a.cooldown_until,
@@ -1889,6 +1922,7 @@ func (db *DB) GetAccountByID(ctx context.Context, id int64) (*AccountRow, error)
 	var cooldownUntilRaw interface{}
 	var createdAtRaw interface{}
 	var updatedAtRaw interface{}
+	var isSoldRaw interface{}
 	if err := row.Scan(
 		&a.ID,
 		&a.Name,
@@ -1896,6 +1930,7 @@ func (db *DB) GetAccountByID(ctx context.Context, id int64) (*AccountRow, error)
 		&a.Type,
 		&credRaw,
 		&a.ProxyURL,
+		&isSoldRaw,
 		&a.PublicAPIKeyID,
 		&a.SettledAmount,
 		&a.Status,
@@ -1913,6 +1948,10 @@ func (db *DB) GetAccountByID(ctx context.Context, id int64) (*AccountRow, error)
 
 	var err error
 	a.Credentials = decodeCredentials(credRaw)
+	a.IsSold, err = parseDBBoolValue(isSoldRaw)
+	if err != nil {
+		return nil, fmt.Errorf("解析 is_sold 失败: %w", err)
+	}
 	a.CooldownUntil, err = parseDBNullTimeValue(cooldownUntilRaw)
 	if err != nil {
 		return nil, fmt.Errorf("解析 cooldown_until 失败: %w", err)
@@ -1947,6 +1986,48 @@ func (db *DB) UpdateAccountProxyURL(ctx context.Context, id int64, proxyURL stri
 		return sql.ErrNoRows
 	}
 	return nil
+}
+
+// UpdateAccountSold 更新账号售出状态。
+func (db *DB) UpdateAccountSold(ctx context.Context, id int64, sold bool) error {
+	tx, err := db.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var name string
+	var credRaw interface{}
+	if err := tx.QueryRowContext(ctx, `SELECT name, credentials FROM accounts WHERE id = $1`, id).Scan(&name, &credRaw); err != nil {
+		return err
+	}
+
+	result, err := tx.ExecContext(
+		ctx,
+		`UPDATE accounts SET is_sold = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+		sold,
+		id,
+	)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+
+	email := strings.TrimSpace(credentialString(credRaw, "email"))
+	if email == "" {
+		email = strings.TrimSpace(name)
+	}
+	if err := db.syncRegisteredAccountSold(ctx, email, sold); err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 // UpdateCredentials 原子合并更新账号的 credentials（JSONB || 运算符，不覆盖已有字段）

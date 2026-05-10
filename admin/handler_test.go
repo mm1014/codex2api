@@ -256,6 +256,117 @@ func TestUpdateAccountProxyRouteRejectsRuntimeStateMismatch(t *testing.T) {
 	}
 }
 
+func TestUpdateAccountSoldRouteUpdatesPersistedState(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := database.New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) returned error: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	accountID, err := db.InsertAccount(ctx, "sold-account", "refresh-token", "http://127.0.0.1:7890")
+	if err != nil {
+		t.Fatalf("InsertAccount returned error: %v", err)
+	}
+
+	handler := NewHandler(auth.NewStore(db, cache.NewMemory(8), &database.SystemSettings{}), db, cache.NewMemory(8), nil, "")
+	router := gin.New()
+	handler.RegisterRoutes(router)
+
+	body := bytes.NewBufferString(`{"is_sold":true}`)
+	req := httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/api/admin/accounts/%d", accountID), body)
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+
+	var payload struct {
+		Message string `json:"message"`
+		IsSold  bool   `json:"is_sold"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got := payload.Message; got != "账号售出状态已更新" {
+		t.Fatalf("message = %q, want %q", got, "账号售出状态已更新")
+	}
+	if !payload.IsSold {
+		t.Fatal("is_sold = false, want true")
+	}
+
+	row, err := db.GetAccountByID(ctx, accountID)
+	if err != nil {
+		t.Fatalf("GetAccountByID returned error: %v", err)
+	}
+	if row == nil {
+		t.Fatalf("GetAccountByID(%d) returned nil", accountID)
+	}
+	if !row.IsSold {
+		t.Fatal("persisted is_sold = false, want true")
+	}
+}
+
+func TestUpdateAccountRejectsMixedEditableFields(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := database.New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) returned error: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	accountID, err := db.InsertAccount(ctx, "mixed-fields-account", "refresh-token", "http://127.0.0.1:7890")
+	if err != nil {
+		t.Fatalf("InsertAccount returned error: %v", err)
+	}
+
+	handler := NewHandler(auth.NewStore(db, cache.NewMemory(8), &database.SystemSettings{}), db, cache.NewMemory(8), nil, "")
+	router := gin.New()
+	handler.RegisterRoutes(router)
+
+	body := bytes.NewBufferString(`{"proxy_url":"http://Codex.acc_541:123@127.0.0.1:2260","is_sold":true}`)
+	req := httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/api/admin/accounts/%d", accountID), body)
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+
+	router.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body = %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	}
+
+	var payload map[string]string
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got := payload["error"]; got != "一次只能修改一个字段" {
+		t.Fatalf("error = %q, want %q", got, "一次只能修改一个字段")
+	}
+
+	row, err := db.GetAccountByID(ctx, accountID)
+	if err != nil {
+		t.Fatalf("GetAccountByID returned error: %v", err)
+	}
+	if row == nil {
+		t.Fatalf("GetAccountByID(%d) returned nil", accountID)
+	}
+	if row.IsSold {
+		t.Fatal("persisted is_sold changed unexpectedly")
+	}
+	if got := row.ProxyURL; got != "http://127.0.0.1:7890" {
+		t.Fatalf("persisted proxy_url = %q, want %q", got, "http://127.0.0.1:7890")
+	}
+}
+
 func TestGetSettingsIncludesSchedulerMode(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

@@ -796,23 +796,29 @@ func (h *Handler) validatePublicUploadedAccount(ctx context.Context, accountID i
 
 	hasContent := false
 	completed := false
+	failed := false
+	failureMessage := ""
 	streamErr := proxy.ReadSSEStream(resp.Body, func(data []byte) bool {
-		eventType := gjson.GetBytes(data, "type").String()
-		switch eventType {
-		case "response.output_text.delta":
-			if strings.TrimSpace(gjson.GetBytes(data, "delta").String()) != "" {
-				hasContent = true
-			}
+		if strings.TrimSpace(extractResponseOutputText(data)) != "" {
+			hasContent = true
+		}
+
+		switch gjson.GetBytes(data, "type").String() {
 		case "response.completed":
 			completed = true
 			return false
 		case "response.failed":
+			failed = true
+			failureMessage = extractResponseFailureMessage(data)
 			return false
 		}
 		return true
 	})
 	if streamErr != nil {
 		return fmt.Errorf("读取测试响应失败: %w", streamErr)
+	}
+	if failed {
+		return errors.New(failureMessage)
 	}
 	if !completed {
 		return errors.New("测试未完成（未收到 response.completed）")

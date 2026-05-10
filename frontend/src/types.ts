@@ -33,6 +33,7 @@ export interface AccountRow {
   last_failure_code?: string
   last_failure_message?: string
   at_only?: boolean
+  is_sold?: boolean
   health_tier?: string
   scheduler_score?: number
   dynamic_concurrency_limit?: number
@@ -79,7 +80,8 @@ export interface AddATAccountRequest {
 }
 
 export interface UpdateAccountRequest {
-  proxy_url: string
+  proxy_url?: string
+  is_sold?: boolean
 }
 
 export interface AccountModelStat {

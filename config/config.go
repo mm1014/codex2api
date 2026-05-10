@@ -66,11 +66,14 @@ func (c *CacheConfig) Label() string {
 // Config 全局核心环境配置（物理隔离的服务器参数）
 // 业务逻辑参数（如 ProxyURL，APIKeys，MaxConcurrency）已全部移至数据库 SystemSettings 进行化
 type Config struct {
-	Port           int
-	AdminSecret    string
-	Database       DatabaseConfig
-	Cache          CacheConfig
-	UseWebsocket   bool   // 是否启用 WebSocket 传输
+	Port                        int
+	AdminSecret                 string
+	Database                    DatabaseConfig
+	Cache                       CacheConfig
+	UseWebsocket                bool // 是否启用 WebSocket 传输
+	RegisteredAccountsDBPath    string
+	RegisteredAccountsSyncURL   string
+	RegisteredAccountsSyncToken string
 }
 
 // Load 从 .env 文件加载核心环境配置，支持环境变量覆盖
@@ -90,6 +93,9 @@ func Load(envPath string) (*Config, error) {
 		fmt.Sscanf(port, "%d", &cfg.Port)
 	}
 	cfg.AdminSecret = strings.TrimSpace(os.Getenv("ADMIN_SECRET"))
+	cfg.RegisteredAccountsDBPath = strings.TrimSpace(os.Getenv("REGISTERED_ACCOUNTS_DB_PATH"))
+	cfg.RegisteredAccountsSyncURL = strings.TrimSpace(os.Getenv("REGISTERED_ACCOUNTS_SYNC_URL"))
+	cfg.RegisteredAccountsSyncToken = strings.TrimSpace(os.Getenv("REGISTERED_ACCOUNTS_SYNC_TOKEN"))
 
 	// WebSocket 配置
 	if v := strings.ToLower(strings.TrimSpace(os.Getenv("USE_WEBSOCKET"))); v == "true" || v == "1" {

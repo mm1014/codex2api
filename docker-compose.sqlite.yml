@@ -11,6 +11,7 @@ services:
     volumes:
       - sqlite-data:/data
       - ./logs:/app/logs
+      - ${REGISTERED_ACCOUNTS_OUTPUT_DIR:-./registered-accounts-output}:/registered-accounts-output
     restart: unless-stopped
 
 volumes:

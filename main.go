@@ -57,11 +57,19 @@ func main() {
 		log.Fatalf("数据库初始化失败: %v", err)
 	}
 	defer db.Close()
+	db.SetRegisteredAccountsDBPath(cfg.RegisteredAccountsDBPath)
+	db.SetRegisteredAccountsSyncURL(cfg.RegisteredAccountsSyncURL, cfg.RegisteredAccountsSyncToken)
 	switch cfg.Database.Driver {
 	case "sqlite":
 		log.Printf("%s 连接成功: %s", cfg.Database.Label(), cfg.Database.Path)
 	default:
 		log.Printf("%s 连接成功: %s:%d/%s", cfg.Database.Label(), cfg.Database.Host, cfg.Database.Port, cfg.Database.DBName)
+	}
+	if cfg.RegisteredAccountsDBPath != "" {
+		log.Printf("registered_accounts 同步已启用: %s", cfg.RegisteredAccountsDBPath)
+	}
+	if cfg.RegisteredAccountsSyncURL != "" {
+		log.Printf("registered_accounts HTTP 同步已启用: %s", cfg.RegisteredAccountsSyncURL)
 	}
 
 	// 3. 读取运行时的系统逻辑设置（需在缓存初始化之前，以获取连接池大小）
