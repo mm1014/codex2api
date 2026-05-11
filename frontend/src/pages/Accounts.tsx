@@ -453,6 +453,7 @@ export default function Accounts() {
   const totalPages = Math.max(1, Math.ceil(sortedAccounts.length / pageSize))
   const pagedAccounts = sortedAccounts.slice((page - 1) * pageSize, page * pageSize)
   const allPageSelected = pagedAccounts.length > 0 && pagedAccounts.every((a) => selected.has(a.id))
+  const allAccountsSelected = accounts.length > 0 && accounts.every((a) => selected.has(a.id))
 
   const toggleSelect = (id: number) => {
     setSelected((prev) => {
@@ -477,6 +478,10 @@ export default function Accounts() {
         return next
       })
     }
+  }
+
+  const toggleSelectAllAccounts = () => {
+    setSelected(allAccountsSelected ? new Set() : new Set(accounts.map((account) => account.id)))
   }
 
   const handleAdd = async () => {
@@ -1313,6 +1318,9 @@ export default function Accounts() {
               <Button variant="outline" size="sm" disabled={batchLoading} onClick={() => void handleBatchToggleSold(true)}>
                 <BadgeCheck className="size-3.5" />
                 {t('accounts.batchSold')}
+              </Button>
+              <Button variant="outline" size="sm" disabled={batchLoading || accounts.length === 0} onClick={toggleSelectAllAccounts}>
+                {allAccountsSelected ? t('accounts.clearAllAccounts') : t('accounts.selectAllAccounts')}
               </Button>
               <Button variant="outline" size="sm" disabled={batchLoading} onClick={() => void handleBatchToggleSold(false)}>
                 <BadgeX className="size-3.5" />

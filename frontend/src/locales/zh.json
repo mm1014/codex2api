@@ -212,6 +212,8 @@
     "importFailedCount": "失败",
     "importDoneHint": "Token 刷新仍在后台进行，可关闭此窗口。",
     "selectAll": "全选",
+    "selectAllAccounts": "全选所有账号",
+    "clearAllAccounts": "清除全选",
     "email": "邮箱",
     "sold": "已售",
     "unsold": "未售",

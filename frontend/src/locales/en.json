@@ -212,6 +212,8 @@
     "importFailedCount": "Failed",
     "importDoneHint": "Token refresh is still running in the background. You can close this dialog.",
     "selectAll": "Select All",
+    "selectAllAccounts": "Select All Accounts",
+    "clearAllAccounts": "Clear All",
     "email": "Email",
     "sold": "Sold",
     "unsold": "Unsold",
