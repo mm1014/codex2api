@@ -560,6 +560,7 @@ func (h *Handler) AddAccount(c *gin.Context) {
 
 		successCount++
 		h.db.InsertAccountEventAsync(id, "added", "manual")
+		h.syncSoldStateFromRegisteredAccount(ctx, id, "manual_add")
 
 		// 热加载：直接加入内存池
 		newAcc := &auth.Account{
@@ -577,6 +578,9 @@ func (h *Handler) AddAccount(c *gin.Context) {
 				log.Printf("新账号 %d 刷新失败: %v", accountID, err)
 			} else {
 				log.Printf("新账号 %d 刷新成功，已加入号池", accountID)
+				soldSyncCtx, soldSyncCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				h.syncSoldStateFromRegisteredAccount(soldSyncCtx, accountID, "manual_add_refresh")
+				soldSyncCancel()
 			}
 			h.triggerForcedPlanSync(accountID, "manual_add")
 		}(id)
@@ -714,6 +718,7 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 				log.Printf("AT 账号 %d 更新 credentials 失败: %v", id, err)
 			}
 		}
+		h.syncSoldStateFromRegisteredAccount(ctx, id, "manual_at")
 		h.triggerForcedPlanSync(id, "manual_at")
 		log.Printf("AT 账号 %d 已加入号池 (id=%d, email=%s)", i+1, id, newAcc.Email)
 	}
@@ -810,8 +815,8 @@ func (h *Handler) UpdateAccount(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":  "账号售出状态已更新",
-		"is_sold":  *req.IsSold,
+		"message": "账号售出状态已更新",
+		"is_sold": *req.IsSold,
 	})
 }
 
@@ -1089,6 +1094,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 			atomic.AddInt64(&successCount, 1)
 			atomic.AddInt64(&current, 1)
 			h.db.InsertAccountEventAsync(id, "added", "import")
+			h.syncSoldStateFromRegisteredAccount(context.Background(), id, "import")
 
 			newAcc := &auth.Account{
 				DBID:         id,
@@ -1105,6 +1111,9 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 					log.Printf("导入账号 %d 刷新失败: %v", accountID, err)
 				} else {
 					log.Printf("导入账号 %d 刷新成功", accountID)
+					soldSyncCtx, soldSyncCancel := context.WithTimeout(context.Background(), 5*time.Second)
+					h.syncSoldStateFromRegisteredAccount(soldSyncCtx, accountID, "import_refresh")
+					soldSyncCancel()
 				}
 				h.triggerForcedPlanSync(accountID, "import_rt")
 			}(id)
@@ -1293,6 +1302,7 @@ func (h *Handler) importMixedAccountsCommon(c *gin.Context, items []importAccoun
 					log.Printf("导入账号 %d 更新 credentials 失败: %v", idx+1, err)
 				}
 			}
+			h.syncSoldStateFromRegisteredAccount(insertCtx, id, source)
 			insertCancel()
 
 			acc := &auth.Account{
@@ -1322,6 +1332,9 @@ func (h *Handler) importMixedAccountsCommon(c *gin.Context, items []importAccoun
 						log.Printf("导入账号 %d 刷新失败: %v", accountID, err)
 					} else {
 						log.Printf("导入账号 %d 刷新成功", accountID)
+						soldSyncCtx, soldSyncCancel := context.WithTimeout(context.Background(), 5*time.Second)
+						h.syncSoldStateFromRegisteredAccount(soldSyncCtx, accountID, source+"_refresh")
+						soldSyncCancel()
 					}
 					h.triggerForcedPlanSync(accountID, "import_rt")
 				}(id)
@@ -1490,6 +1503,9 @@ func (h *Handler) importAccountsATTXT(c *gin.Context, proxyURL string) {
 					"expires_at": newAcc.ExpiresAt.Format(time.RFC3339),
 				})
 				credCancel()
+				soldSyncCtx, soldSyncCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				h.syncSoldStateFromRegisteredAccount(soldSyncCtx, id, "import_at")
+				soldSyncCancel()
 
 				// 如果解析到邮箱，用邮箱替换默认名称
 				if atInfo.Email != "" {
@@ -1582,6 +1598,10 @@ func (h *Handler) RefreshAccount(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "刷新失败: "+err.Error())
 		return
 	}
+	soldSyncCtx, soldSyncCancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	h.syncSoldStateFromRegisteredAccount(soldSyncCtx, id, "manual_refresh")
+	soldSyncCancel()
+
 	syncCtx, syncCancel := context.WithTimeout(c.Request.Context(), 25*time.Second)
 	defer syncCancel()
 	if err := h.forceSyncPlanFromWhamUsageByID(syncCtx, id); err != nil {
@@ -1597,6 +1617,20 @@ func (h *Handler) refreshSingleAccount(ctx context.Context, id int64) error {
 		return fmt.Errorf("账号池未初始化")
 	}
 	return h.store.RefreshSingle(ctx, id)
+}
+
+func (h *Handler) syncSoldStateFromRegisteredAccount(ctx context.Context, id int64, source string) {
+	if h == nil || h.db == nil || id <= 0 {
+		return
+	}
+	updated, err := h.db.SyncAccountSoldFromRegisteredAccount(ctx, id)
+	if err != nil {
+		log.Printf("账号 %d 从 registered_accounts 同步售出状态失败(%s): %v", id, source, err)
+		return
+	}
+	if updated {
+		log.Printf("账号 %d 已从 registered_accounts 同步售出状态(%s)", id, source)
+	}
 }
 
 // ==================== Health ====================

@@ -3,6 +3,7 @@ package admin
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -142,6 +143,121 @@ func TestRefreshAccountReturnsRefreshFailure(t *testing.T) {
 	}
 	if got := payload["error"]; got != "刷新失败: upstream unavailable" {
 		t.Fatalf("error = %q, want %q", got, "刷新失败: upstream unavailable")
+	}
+}
+
+func TestRefreshAccountSyncsSoldStateAfterSuccessfulRefresh(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := database.New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) returned error: %v", err)
+	}
+	defer db.Close()
+
+	sidecarPath := filepath.Join(t.TempDir(), "webui.db")
+	sidecar, err := sql.Open("sqlite", sidecarPath)
+	if err != nil {
+		t.Fatalf("open sidecar sqlite returned error: %v", err)
+	}
+	defer sidecar.Close()
+	if _, err := sidecar.Exec(`CREATE TABLE registered_accounts (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL COLLATE NOCASE, is_sold TEXT)`); err != nil {
+		t.Fatalf("create registered_accounts returned error: %v", err)
+	}
+	if _, err := sidecar.Exec(`INSERT INTO registered_accounts (email, is_sold) VALUES (?, ?)`, "sold-refresh@example.com", "true"); err != nil {
+		t.Fatalf("insert registered account returned error: %v", err)
+	}
+
+	ctx := context.Background()
+	accountID, err := db.InsertAccount(ctx, "sold-refresh@example.com", "refresh-token", "")
+	if err != nil {
+		t.Fatalf("InsertAccount returned error: %v", err)
+	}
+	db.SetRegisteredAccountsDBPath(sidecarPath)
+
+	handler := &Handler{
+		db: db,
+		refreshAccount: func(_ context.Context, id int64) error {
+			if id != accountID {
+				t.Fatalf("refresh id = %d, want %d", id, accountID)
+			}
+			return nil
+		},
+	}
+
+	recorder := httptest.NewRecorder()
+	reqCtx, _ := gin.CreateTestContext(recorder)
+	reqCtx.Params = gin.Params{{Key: "id", Value: fmt.Sprint(accountID)}}
+	reqCtx.Request = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/admin/accounts/%d/refresh", accountID), nil)
+
+	handler.RefreshAccount(reqCtx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	row, err := db.GetAccountByID(ctx, accountID)
+	if err != nil {
+		t.Fatalf("GetAccountByID returned error: %v", err)
+	}
+	if !row.IsSold {
+		t.Fatal("accounts.is_sold = false, want true")
+	}
+}
+
+func TestRefreshAccountDoesNotSyncSoldStateAfterRefreshFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := database.New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) returned error: %v", err)
+	}
+	defer db.Close()
+
+	sidecarPath := filepath.Join(t.TempDir(), "webui.db")
+	sidecar, err := sql.Open("sqlite", sidecarPath)
+	if err != nil {
+		t.Fatalf("open sidecar sqlite returned error: %v", err)
+	}
+	defer sidecar.Close()
+	if _, err := sidecar.Exec(`CREATE TABLE registered_accounts (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL COLLATE NOCASE, is_sold TEXT)`); err != nil {
+		t.Fatalf("create registered_accounts returned error: %v", err)
+	}
+	if _, err := sidecar.Exec(`INSERT INTO registered_accounts (email, is_sold) VALUES (?, ?)`, "failed-refresh@example.com", "true"); err != nil {
+		t.Fatalf("insert registered account returned error: %v", err)
+	}
+
+	ctx := context.Background()
+	accountID, err := db.InsertAccount(ctx, "failed-refresh@example.com", "refresh-token", "")
+	if err != nil {
+		t.Fatalf("InsertAccount returned error: %v", err)
+	}
+	db.SetRegisteredAccountsDBPath(sidecarPath)
+
+	handler := &Handler{
+		db: db,
+		refreshAccount: func(context.Context, int64) error {
+			return errors.New("upstream unavailable")
+		},
+	}
+
+	recorder := httptest.NewRecorder()
+	reqCtx, _ := gin.CreateTestContext(recorder)
+	reqCtx.Params = gin.Params{{Key: "id", Value: fmt.Sprint(accountID)}}
+	reqCtx.Request = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/admin/accounts/%d/refresh", accountID), nil)
+
+	handler.RefreshAccount(reqCtx)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d, body = %s", recorder.Code, http.StatusInternalServerError, recorder.Body.String())
+	}
+	row, err := db.GetAccountByID(ctx, accountID)
+	if err != nil {
+		t.Fatalf("GetAccountByID returned error: %v", err)
+	}
+	if row.IsSold {
+		t.Fatal("accounts.is_sold changed after failed refresh")
 	}
 }
 

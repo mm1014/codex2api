@@ -253,6 +253,10 @@ func (h *Handler) BatchRefresh(c *gin.Context) {
 				atomic.AddInt64(&failedCount, 1)
 				return
 			}
+			soldSyncCtx, soldSyncCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			h.syncSoldStateFromRegisteredAccount(soldSyncCtx, id, "batch_refresh")
+			soldSyncCancel()
+
 			syncCtx, syncCancel := context.WithTimeout(context.Background(), 25*time.Second)
 			defer syncCancel()
 			if err := h.forceSyncPlanFromWhamUsageByID(syncCtx, id); err != nil {

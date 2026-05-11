@@ -653,6 +653,7 @@ func (h *Handler) insertCompatAccount(ctx context.Context, name string, entry co
 	if len(creds) > 0 {
 		_ = h.db.UpdateCredentials(ctx, id, creds)
 	}
+	h.syncSoldStateFromRegisteredAccount(ctx, id, "cliproxy")
 
 	acc := &auth.Account{
 		DBID:         id,

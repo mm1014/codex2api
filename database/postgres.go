@@ -2023,11 +2023,55 @@ func (db *DB) UpdateAccountSold(ctx context.Context, id int64, sold bool) error 
 	if email == "" {
 		email = strings.TrimSpace(name)
 	}
-	if err := db.syncRegisteredAccountSold(ctx, email, sold); err != nil {
+	refreshToken := strings.TrimSpace(credentialString(credRaw, "refresh_token"))
+	if err := db.syncRegisteredAccountSold(ctx, email, refreshToken, sold); err != nil {
 		return err
 	}
 
 	return tx.Commit()
+}
+
+// SyncAccountSoldFromRegisteredAccount copies the latest sidecar sold state into
+// the local account row. It returns false when no matching sidecar row exists.
+func (db *DB) SyncAccountSoldFromRegisteredAccount(ctx context.Context, id int64) (bool, error) {
+	if db == nil || db.conn == nil || id <= 0 {
+		return false, nil
+	}
+
+	var name string
+	var credRaw interface{}
+	if err := db.conn.QueryRowContext(ctx, `SELECT name, credentials FROM accounts WHERE id = $1`, id).Scan(&name, &credRaw); err != nil {
+		return false, err
+	}
+
+	email := strings.TrimSpace(credentialString(credRaw, "email"))
+	if email == "" {
+		email = strings.TrimSpace(name)
+	}
+	refreshToken := strings.TrimSpace(credentialString(credRaw, "refresh_token"))
+
+	sold, found, err := db.lookupRegisteredAccountSold(ctx, email, refreshToken)
+	if err != nil || !found {
+		return false, err
+	}
+
+	result, err := db.conn.ExecContext(
+		ctx,
+		`UPDATE accounts SET is_sold = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+		sold,
+		id,
+	)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if affected == 0 {
+		return false, sql.ErrNoRows
+	}
+	return true, nil
 }
 
 // UpdateCredentials 原子合并更新账号的 credentials（JSONB || 运算符，不覆盖已有字段）
