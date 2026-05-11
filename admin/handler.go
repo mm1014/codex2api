@@ -810,6 +810,7 @@ func (h *Handler) UpdateAccount(c *gin.Context) {
 			writeError(c, http.StatusNotFound, fmt.Sprintf("账号 %d 不存在", id))
 			return
 		}
+		log.Printf("更新账号 %d 售出状态失败(is_sold=%t): %v", id, *req.IsSold, err)
 		writeError(c, http.StatusInternalServerError, "更新账号售出状态失败: "+err.Error())
 		return
 	}
