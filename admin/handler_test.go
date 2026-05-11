@@ -19,6 +19,27 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+func TestSplitBulkAccountTokensDoesNotLimitBatchSize(t *testing.T) {
+	var builder bytes.Buffer
+	for i := 0; i < 101; i++ {
+		if i > 0 {
+			builder.WriteByte('\n')
+		}
+		builder.WriteString(fmt.Sprintf("token-%03d", i))
+	}
+
+	tokens := splitBulkAccountTokens(builder.String(), func(s string) string {
+		return s
+	})
+
+	if len(tokens) != 101 {
+		t.Fatalf("token count = %d, want 101", len(tokens))
+	}
+	if tokens[0] != "token-000" || tokens[100] != "token-100" {
+		t.Fatalf("unexpected token bounds: first=%q last=%q", tokens[0], tokens[100])
+	}
+}
+
 func TestRefreshAccountRejectsInvalidID(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

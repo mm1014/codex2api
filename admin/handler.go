@@ -481,6 +481,21 @@ type addAccountReq struct {
 	ProxyURL     string `json:"proxy_url"`
 }
 
+func splitBulkAccountTokens(raw string, sanitize func(string) string) []string {
+	lines := strings.Split(raw, "\n")
+	tokens := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if sanitize != nil {
+			line = sanitize(line)
+		}
+		t := strings.TrimSpace(line)
+		if t != "" {
+			tokens = append(tokens, t)
+		}
+	}
+	return tokens
+}
+
 // AddAccount 添加新账号（支持批量：refresh_token 按行分割）
 func (h *Handler) AddAccount(c *gin.Context) {
 	var req addAccountReq
@@ -517,23 +532,10 @@ func (h *Handler) AddAccount(c *gin.Context) {
 	}
 
 	// 按行分割，支持批量添加
-	lines := strings.Split(req.RefreshToken, "\n")
-	var tokens []string
-	for _, line := range lines {
-		t := strings.TrimSpace(security.SanitizeInput(line))
-		if t != "" {
-			tokens = append(tokens, t)
-		}
-	}
+	tokens := splitBulkAccountTokens(req.RefreshToken, security.SanitizeInput)
 
 	if len(tokens) == 0 {
 		writeError(c, http.StatusBadRequest, "未找到有效的 Refresh Token")
-		return
-	}
-
-	// 限制批量添加数量
-	if len(tokens) > 100 {
-		writeError(c, http.StatusBadRequest, "单次最多添加100个账号")
 		return
 	}
 
@@ -645,22 +647,10 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 	}
 
 	// 按行分割，支持批量添加
-	lines := strings.Split(req.AccessToken, "\n")
-	var tokens []string
-	for _, line := range lines {
-		t := strings.TrimSpace(line)
-		if t != "" {
-			tokens = append(tokens, t)
-		}
-	}
+	tokens := splitBulkAccountTokens(req.AccessToken, nil)
 
 	if len(tokens) == 0 {
 		writeError(c, http.StatusBadRequest, "未找到有效的 Access Token")
-		return
-	}
-
-	if len(tokens) > 100 {
-		writeError(c, http.StatusBadRequest, "单次最多添加100个账号")
 		return
 	}
 
