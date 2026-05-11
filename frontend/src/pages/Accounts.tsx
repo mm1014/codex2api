@@ -996,20 +996,25 @@ export default function Accounts() {
     setBatchLoading(true)
     let success = 0
     let fail = 0
+    let firstError = ''
     try {
       for (const id of selectedIds) {
         try {
           await api.updateAccount(id, { is_sold: nextSold })
           success++
-        } catch {
+        } catch (error) {
+          if (!firstError) {
+            firstError = getErrorMessage(error)
+          }
           fail++
         }
       }
-      showToast(t('accounts.batchSetSoldDone', {
+      const message = t('accounts.batchSetSoldDone', {
         state: stateLabel,
         success,
         fail,
-      }))
+      })
+      showToast(firstError ? `${message}：${firstError}` : message, firstError ? 'error' : 'success')
       void reload()
     } finally {
       setBatchLoading(false)
